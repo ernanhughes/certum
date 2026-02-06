@@ -1,4 +1,4 @@
-# src/verity_gate/energy.py
+# src/verity_gate/energy/hallucination.py
 from __future__ import annotations
 
 import logging
