@@ -1,677 +1,647 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import sqlite3
 import time
 import unicodedata
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from tqdm import tqdm
 
 
-# ============================================================
-# Evidence-id parsing
-# ============================================================
+# ----------------------------
+# Element ID parsing
+# ----------------------------
 
-# FEVEROUS element IDs look like:
-#   "Algebraic logic_sentence_0"
-#   "Algebraic logic_cell_0_1_1"
-#   "Algebraic logic_header_cell_0_0_1"
-#   "Algebraic logic_section_4"
-#   "Algebraic logic_title"
-#   "The Discoverie of Witchcraft_table_caption_0"
-#
-# We parse by matching the LAST evidence-type token.
-EID_RE = re.compile(
-    r"^(?P<page>.+)_(?P<kind>sentence|cell|header_cell|item|section|table_caption|title)(?:_(?P<rest>.*))?$"
-)
+ELEM_KINDS = [
+    "header_cell",
+    "table_caption",
+    "sentence",
+    "cell",
+    "item",
+    "title",
+    "section",
+    "list",
+]
 
-def _norm(s: str) -> str:
-    return unicodedata.normalize("NFC", s).strip()
-
-def split_evidence_id(eid: str) -> Tuple[Optional[str], Optional[str]]:
+def parse_element_id(element_id: str) -> Tuple[str, str, str]:
     """
-    "Manchester Cancer Research Centre_sentence_0" -> ("Manchester Cancer Research Centre", "sentence_0")
-    "Some Page_title" -> ("Some Page", "title")
+    Returns (page_id, kind, rest).
+    Examples:
+      "Algebraic logic_sentence_0" -> ("Algebraic logic","sentence","0")
+      "John Laurie_cell_2_13_1"    -> ("John Laurie","cell","2_13_1")
+      "Foo_title"                  -> ("Foo","title","")
+      "Foo_section_4"              -> ("Foo","section","4")
     """
-    eid = _norm(eid)
-    m = EID_RE.match(eid)
-    if not m:
-        return None, None
+    # Handle suffix-only types first
+    if element_id.endswith("_title"):
+        return element_id[:-6], "title", ""
+    m = re.match(r"^(.*)_section_(\d+)$", element_id)
+    if m:
+        return m.group(1), "section", m.group(2)
+    m = re.match(r"^(.*)_list_(\d+)$", element_id)
+    if m:
+        return m.group(1), "list", m.group(2)
 
-    page = _norm(m.group("page"))
-    kind = m.group("kind")
-    rest = m.group("rest")
+    # Handle _<kind>_... forms; page_id may contain underscores/spaces
+    for kind in ["header_cell", "table_caption", "sentence", "cell", "item"]:
+        token = f"_{kind}_"
+        idx = element_id.rfind(token)
+        if idx != -1:
+            page_id = element_id[:idx]
+            rest = element_id[idx + len(token):]
+            return page_id, kind, rest
 
-    if kind == "title":
-        return page, "title"
-
-    if not rest:
-        return None, None
-
-    local = f"{kind}_{rest}"
-    return page, _norm(local)
+    raise ValueError(f"Unrecognized element_id: {element_id}")
 
 
-# ============================================================
-# Simple wiki markup cleanup
-# ============================================================
+# ----------------------------
+# Wiki DB access + resolver
+# ----------------------------
 
-WIKI_LINK_RE = re.compile(r"\[\[([^\]|]+)\|([^\]]+)\]\]|\[\[([^\]]+)\]\]")
-
-def strip_wiki_markup(text: str) -> str:
+def _normalize_title_variants(title: str) -> List[str]:
     """
-    [[A|B]] -> B
-    [[A]] -> A
+    Generate reasonable variants for SQLite id lookups.
+    This is important for unicode normalization (– vs -, NFC/NFKC, etc.).
     """
-    def repl(m: re.Match) -> str:
-        if m.group(2):
-            return m.group(2)
-        return m.group(3) or m.group(1) or ""
-    return WIKI_LINK_RE.sub(repl, text)
+    title = title.strip()
+    variants = []
+
+    def add(t: str):
+        t = t.strip()
+        if t and t not in variants:
+            variants.append(t)
+
+    add(title)
+    add(unicodedata.normalize("NFC", title))
+    add(unicodedata.normalize("NFKC", title))
+    # dash normalization
+    add(title.replace("–", "-").replace("—", "-"))
+    add(unicodedata.normalize("NFC", title.replace("–", "-").replace("—", "-")))
+    # underscore/space swap (some dumps differ)
+    add(title.replace("_", " "))
+    add(title.replace(" ", "_"))
+
+    return variants
 
 
-# ============================================================
-# Validation
-# ============================================================
-
-def is_valid_text(text: str, *, min_chars: int = 5, max_chars: int = 20000) -> bool:
-    if not text:
-        return False
-    t = text.strip()
-    if len(t) < min_chars:
-        return False
-    if len(t) > max_chars:
-        return False
-    if not re.search(r"[A-Za-z0-9]", t):
-        return False
-    return True
-
-def sha1_text(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
-
-
-# ============================================================
-# Wiki resolver (reads your feverous_wikiv1.db)
-# ============================================================
-
-class WikiSqliteResolver:
-    """
-    Expects SQLite:
-      CREATE TABLE wiki (id PRIMARY KEY, data json)
-    where wiki.id == Wikipedia page title (text),
-    wiki.data == JSON string for that page.
-    """
-
-    def __init__(self, wiki_db_path: str | Path):
-        self.wiki_db_path = str(wiki_db_path)
-        self.conn = sqlite3.connect(self.wiki_db_path)
+class WikiDB:
+    def __init__(self, path: str):
+        self.path = path
+        self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
+        self._page_id_cache: Dict[str, Optional[str]] = {}
 
     def close(self) -> None:
         self.conn.close()
 
-    def get_page_json(self, page_id: str) -> Optional[dict]:
-        page_id = _norm(page_id)
-        cur = self.conn.execute("SELECT data FROM wiki WHERE id = ?", (page_id,))
-        row = cur.fetchone()
+    def resolve_page_id(self, page_id: str) -> Optional[str]:
+        if page_id in self._page_id_cache:
+            return self._page_id_cache[page_id]
+
+        for cand in _normalize_title_variants(page_id):
+            row = self.conn.execute("SELECT id FROM wiki WHERE id = ? LIMIT 1", (cand,)).fetchone()
+            if row:
+                self._page_id_cache[page_id] = row["id"]
+                return row["id"]
+
+        self._page_id_cache[page_id] = None
+        return None
+
+    def load_page_json(self, resolved_page_id: str) -> Dict[str, Any]:
+        row = self.conn.execute("SELECT data FROM wiki WHERE id = ? LIMIT 1", (resolved_page_id,)).fetchone()
         if not row:
-            return None
-        raw = row["data"]
-        try:
-            return json.loads(raw)
-        except Exception:
-            return None
+            raise KeyError(f"page not found: {resolved_page_id}")
+        data = row["data"]
+        if isinstance(data, (bytes, bytearray)):
+            data = data.decode("utf-8")
+        return json.loads(data)
 
-    def resolve_local(self, page_json: dict, local_id: str) -> Optional[str]:
-        # title
-        if local_id == "title":
-            v = page_json.get("title")
-            return str(v) if isinstance(v, str) else None
 
-        # sentence_#
-        if local_id.startswith("sentence_"):
-            v = page_json.get(local_id)
-            return str(v) if isinstance(v, str) else None
+@dataclass
+class PageIndex:
+    title: str
+    sentences: Dict[str, str]
+    sections: Dict[str, str]          # "section_4" -> "Physics"
+    lists: Dict[str, str]             # "list_0" -> joined bullet string
+    items: Dict[str, str]             # "item_0_0" -> item value
+    cells: Dict[str, str]             # "cell_0_1_1" -> cell value
+    header_cells: Dict[str, str]      # "header_cell_0_0_1" -> header cell value
+    table_captions: Dict[str, str]    # "table_caption_0" -> caption string
 
-        # section_# -> {"value": "...", "level": n}
-        if local_id.startswith("section_"):
-            sec = page_json.get(local_id)
-            if isinstance(sec, dict):
-                v = sec.get("value")
-                return str(v) if isinstance(v, str) else None
-            return None
+    @staticmethod
+    def from_page_json(page: Dict[str, Any]) -> "PageIndex":
+        title = page.get("title", "")
 
-        # item_*_* lives inside list_*
-        if local_id.startswith("item_"):
-            for k, v in page_json.items():
-                if not k.startswith("list_") or not isinstance(v, dict):
-                    continue
-                items = v.get("list")
-                if not isinstance(items, list):
-                    continue
-                for it in items:
-                    if isinstance(it, dict) and it.get("id") == local_id:
-                        val = it.get("value")
-                        return str(val) if isinstance(val, str) else None
-            return None
+        # Sentences and sections are direct keys in the JSON
+        sentences = {}
+        sections = {}
+        lists = {}
+        items = {}
+        cells = {}
+        header_cells = {}
+        table_captions = {}
 
-        # cell/header_cell live inside table_*["table"]
-        if local_id.startswith(("cell_", "header_cell_")):
-            for k, v in page_json.items():
-                if not k.startswith("table_") or not isinstance(v, dict):
-                    continue
-                table = v.get("table")
-                if not isinstance(table, list):
-                    continue
-                for row in table:
+        for k, v in page.items():
+            if k.startswith("sentence_") and isinstance(v, str):
+                sentences[k] = v
+            elif k.startswith("section_") and isinstance(v, dict):
+                # store the visible section title / value
+                sections[k] = str(v.get("value", "")).strip()
+            elif k.startswith("list_") and isinstance(v, dict):
+                # list: {type:..., list:[{id,value,level,type},...]}
+                li = v.get("list", [])
+                lines = []
+                for it in li:
+                    if not isinstance(it, dict):
+                        continue
+                    iid = it.get("id")
+                    ival = str(it.get("value", "")).strip()
+                    if iid:
+                        items[iid] = ival
+                    if ival:
+                        lines.append(ival)
+                lists[k] = "\n".join(lines).strip()
+
+            elif k.startswith("table_") and isinstance(v, dict):
+                # captions
+                cap = v.get("caption")
+                if cap:
+                    # FEVEROUS refers to "table_caption_0" etc
+                    table_idx = k.split("_", 1)[1]
+                    table_captions[f"table_caption_{table_idx}"] = str(cap).strip()
+
+                # cells inside v["table"] (list of rows)
+                t = v.get("table", [])
+                for row in t:
                     if not isinstance(row, list):
                         continue
                     for cell in row:
-                        if isinstance(cell, dict) and cell.get("id") == local_id:
-                            val = cell.get("value")
-                            return str(val) if isinstance(val, str) else None
+                        if not isinstance(cell, dict):
+                            continue
+                        cid = cell.get("id")
+                        val = str(cell.get("value", "")).strip()
+                        if not cid:
+                            continue
+                        if cid.startswith("header_cell_"):
+                            header_cells[cid] = val
+                        elif cid.startswith("cell_"):
+                            cells[cid] = val
+
+        return PageIndex(
+            title=title,
+            sentences=sentences,
+            sections=sections,
+            lists=lists,
+            items=items,
+            cells=cells,
+            header_cells=header_cells,
+            table_captions=table_captions,
+        )
+
+
+class WikiResolver:
+    def __init__(self, wiki_db: WikiDB, page_cache_size: int = 256):
+        self.wiki_db = wiki_db
+        self._page_cache: Dict[str, PageIndex] = {}
+        self._page_cache_order: List[str] = []
+        self.page_cache_size = page_cache_size
+
+    def _get_page_index(self, page_id_raw: str) -> Optional[PageIndex]:
+        resolved = self.wiki_db.resolve_page_id(page_id_raw)
+        if not resolved:
             return None
 
-        # table_caption_# stored as table_#["caption"]
-        if local_id.startswith("table_caption_"):
-            try:
-                idx = int(local_id.split("_")[-1])
-            except Exception:
-                return None
-            tkey = f"table_{idx}"
-            t = page_json.get(tkey)
-            if isinstance(t, dict):
-                cap = t.get("caption")
-                return str(cap) if isinstance(cap, str) else None
+        if resolved in self._page_cache:
+            return self._page_cache[resolved]
+
+        page = self.wiki_db.load_page_json(resolved)
+        idx = PageIndex.from_page_json(page)
+
+        # Simple LRU
+        self._page_cache[resolved] = idx
+        self._page_cache_order.append(resolved)
+        if len(self._page_cache_order) > self.page_cache_size:
+            old = self._page_cache_order.pop(0)
+            self._page_cache.pop(old, None)
+
+        return idx
+
+    def resolve_text(self, element_id: str) -> Optional[str]:
+        page_id, kind, rest = parse_element_id(element_id)
+        idx = self._get_page_index(page_id)
+        if idx is None:
             return None
+
+        if kind == "title":
+            return idx.title.strip() or page_id.strip()
+
+        if kind == "sentence":
+            key = f"sentence_{rest}"
+            return (idx.sentences.get(key) or "").strip() or None
+
+        if kind == "section":
+            key = f"section_{rest}"
+            return (idx.sections.get(key) or "").strip() or None
+
+        if kind == "list":
+            key = f"list_{rest}"
+            return (idx.lists.get(key) or "").strip() or None
+
+        if kind == "item":
+            key = f"item_{rest}"
+            return (idx.items.get(key) or "").strip() or None
+
+        if kind == "cell":
+            key = f"cell_{rest}"
+            return (idx.cells.get(key) or "").strip() or None
+
+        if kind == "header_cell":
+            key = f"header_cell_{rest}"
+            return (idx.header_cells.get(key) or "").strip() or None
+
+        if kind == "table_caption":
+            key = f"table_caption_{rest}"
+            return (idx.table_captions.get(key) or "").strip() or None
 
         return None
 
-    def resolve_evidence_id(self, evidence_id: str) -> Tuple[str, str, Optional[str], Optional[str]]:
-        """
-        Returns: (page_id, local_id, text, error)
-        """
-        page_id, local_id = split_evidence_id(evidence_id)
-        if not page_id or not local_id:
-            return "", "", None, "bad_evidence_id_format"
 
-        page_json = self.get_page_json(page_id)
-        if page_json is None:
-            return page_id, local_id, None, "page_not_found_or_bad_json"
-
-        text = self.resolve_local(page_json, local_id)
-        if text is None:
-            return page_id, local_id, None, "local_id_not_found"
-
-        return page_id, local_id, text, None
-
-
-# ============================================================
+# ----------------------------
 # Cache DB (resolved + embeddings)
-# ============================================================
+# ----------------------------
 
-class EvidenceCacheDB:
-    def __init__(self, cache_db_path: str | Path):
-        self.cache_db_path = str(cache_db_path)
-        self.conn = sqlite3.connect(self.cache_db_path)
+class CacheDB:
+    def __init__(self, path: str):
+        self.path = path
+        self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
-        self._init()
+        self._setup()
 
     def close(self) -> None:
         self.conn.close()
 
-    def _init(self) -> None:
+    def _setup(self) -> None:
         cur = self.conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA synchronous=NORMAL;")
         cur.execute("PRAGMA temp_store=MEMORY;")
 
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS resolved_items (
-              evidence_id TEXT PRIMARY KEY,
-              page_id TEXT NOT NULL,
-              local_id TEXT NOT NULL,
-              text TEXT,
-              text_hash TEXT,
-              status TEXT NOT NULL,          -- ok | failed
-              error TEXT,
-              cleaned INTEGER NOT NULL DEFAULT 0,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
-            """
-        )
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS resolved (
+            element_id TEXT PRIMARY KEY,
+            ok INTEGER NOT NULL,
+            text TEXT,
+            error TEXT,
+            kind TEXT,
+            page_id TEXT,
+            updated_at REAL NOT NULL
+        );
+        """)
 
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS embeddings (
-              evidence_id TEXT NOT NULL,
-              model_name TEXT NOT NULL,
-              dim INTEGER NOT NULL,
-              dtype TEXT NOT NULL,           -- float32
-              vector BLOB NOT NULL,
-              created_at REAL NOT NULL,
-              PRIMARY KEY (evidence_id, model_name),
-              FOREIGN KEY (evidence_id) REFERENCES resolved_items(evidence_id)
-            );
-            """
-        )
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS embeddings (
+            element_id TEXT PRIMARY KEY,
+            model TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            vec BLOB NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """)
 
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_resolved_status ON resolved_items(status);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_resolved_ok ON resolved(ok);")
         self.conn.commit()
 
-    def get_resolved_row(self, evidence_id: str) -> Optional[sqlite3.Row]:
-        cur = self.conn.execute(
-            "SELECT * FROM resolved_items WHERE evidence_id = ?",
-            (evidence_id,),
-        )
-        return cur.fetchone()
+    def has_embedding(self, element_id: str, model: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM embeddings WHERE element_id = ? AND model = ? LIMIT 1",
+            (element_id, model),
+        ).fetchone()
+        return row is not None
 
-    def upsert_resolved_ok(self, evidence_id: str, page_id: str, local_id: str, text: str, *, cleaned: bool) -> None:
-        now = time.time()
+    def has_ok_embedding(self, element_id: str, model: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM resolved r
+            JOIN embeddings e ON e.element_id = r.element_id
+            WHERE r.element_id = ? AND r.ok = 1 AND e.model = ?
+            LIMIT 1
+            """,
+            (element_id, model),
+        ).fetchone()
+        return row is not None
+
+    def put_resolved_ok(self, element_id: str, text: str) -> None:
+        page_id, kind, _ = parse_element_id(element_id)
         self.conn.execute(
             """
-            INSERT INTO resolved_items(evidence_id, page_id, local_id, text, text_hash, status, error, cleaned, created_at, updated_at)
-            VALUES(?,?,?,?,?,'ok',NULL,?,?,?)
-            ON CONFLICT(evidence_id) DO UPDATE SET
-              page_id=excluded.page_id,
-              local_id=excluded.local_id,
-              text=excluded.text,
-              text_hash=excluded.text_hash,
-              status='ok',
-              error=NULL,
-              cleaned=excluded.cleaned,
-              updated_at=excluded.updated_at
+            INSERT INTO resolved(element_id, ok, text, error, kind, page_id, updated_at)
+            VALUES(?, 1, ?, NULL, ?, ?, ?)
+            ON CONFLICT(element_id) DO UPDATE SET
+                ok=1, text=excluded.text, error=NULL, kind=excluded.kind, page_id=excluded.page_id, updated_at=excluded.updated_at
             """,
-            (evidence_id, page_id, local_id, text, sha1_text(text), int(cleaned), now, now),
+            (element_id, text, kind, page_id, time.time()),
         )
 
-    def upsert_resolved_failed(self, evidence_id: str, page_id: str, local_id: str, error: str) -> None:
-        now = time.time()
+    def put_resolved_fail(self, element_id: str, error: str) -> None:
+        page_id, kind, _ = parse_element_id(element_id)
         self.conn.execute(
             """
-            INSERT INTO resolved_items(evidence_id, page_id, local_id, text, text_hash, status, error, cleaned, created_at, updated_at)
-            VALUES(?,?,?,NULL,NULL,'failed',?,0,?,?)
-            ON CONFLICT(evidence_id) DO UPDATE SET
-              page_id=excluded.page_id,
-              local_id=excluded.local_id,
-              status='failed',
-              error=excluded.error,
-              updated_at=excluded.updated_at
+            INSERT INTO resolved(element_id, ok, text, error, kind, page_id, updated_at)
+            VALUES(?, 0, NULL, ?, ?, ?, ?)
+            ON CONFLICT(element_id) DO UPDATE SET
+                ok=0, text=NULL, error=excluded.error, kind=excluded.kind, page_id=excluded.page_id, updated_at=excluded.updated_at
             """,
-            (evidence_id, page_id, local_id, error, now, now),
+            (element_id, error[:500], kind, page_id, time.time()),
         )
 
-    def has_embedding(self, evidence_id: str, model_name: str) -> bool:
-        cur = self.conn.execute(
-            "SELECT 1 FROM embeddings WHERE evidence_id=? AND model_name=?",
-            (evidence_id, model_name),
-        )
-        return cur.fetchone() is not None
-
-    def upsert_embedding(self, evidence_id: str, model_name: str, vec: np.ndarray) -> None:
-        vec = np.asarray(vec, dtype=np.float32)
+    def put_embeddings(self, element_ids: Sequence[str], vecs: np.ndarray, model: str) -> None:
+        assert vecs.ndim == 2 and len(element_ids) == vecs.shape[0]
+        dim = int(vecs.shape[1])
         now = time.time()
-        self.conn.execute(
+
+        rows = []
+        for eid, v in zip(element_ids, vecs):
+            v = np.asarray(v, dtype=np.float32)
+            rows.append((eid, model, dim, v.tobytes(), now))
+
+        self.conn.executemany(
             """
-            INSERT INTO embeddings(evidence_id, model_name, dim, dtype, vector, created_at)
-            VALUES(?,?,?,?,?,?)
-            ON CONFLICT(evidence_id, model_name) DO UPDATE SET
-              dim=excluded.dim,
-              dtype=excluded.dtype,
-              vector=excluded.vector,
-              created_at=excluded.created_at
+            INSERT INTO embeddings(element_id, model, dim, vec, updated_at)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(element_id) DO UPDATE SET
+                model=excluded.model, dim=excluded.dim, vec=excluded.vec, updated_at=excluded.updated_at
             """,
-            (evidence_id, model_name, int(vec.size), "float32", vec.tobytes(), now),
+            rows,
         )
 
 
-# ============================================================
-# Embedder (SentenceTransformers)
-# ============================================================
+# ----------------------------
+# Dataset reading + completeness
+# ----------------------------
 
-class STEmbedder:
-    def __init__(self, model_name: str, batch_size: int = 64):
-        self.model_name = model_name
-        self.batch_size = batch_size
-        from sentence_transformers import SentenceTransformer  # type: ignore
-        self.model = SentenceTransformer(model_name)
-
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
-        arr = self.model.encode(
-            list(texts),
-            batch_size=self.batch_size,
-            show_progress_bar=False,
-            normalize_embeddings=False,
-        )
-        return np.asarray(arr, dtype=np.float32)
-
-
-# ============================================================
-# FEVEROUS parsing helpers
-# ============================================================
-
-def collect_evidence_ids(example: dict, include_context: bool) -> Set[str]:
-    ids: Set[str] = set()
-
-    ev = example.get("evidence", [])
-    # some files contain a schema line with evidence = "" (string)
-    if isinstance(ev, str):
-        return ids
-    if isinstance(ev, dict):
-        ev = [ev]
-
-    if not isinstance(ev, list):
-        return ids
-
-    for evset in ev:
-        if not isinstance(evset, dict):
-            continue
-
-        content = evset.get("content", [])
-        if isinstance(content, list):
-            for x in content:
-                if isinstance(x, str) and x:
-                    ids.add(_norm(x))
-
-        if include_context:
-            ctx = evset.get("context", {})
-            if isinstance(ctx, dict):
-                for k, v in ctx.items():
-                    if isinstance(k, str) and k:
-                        ids.add(_norm(k))
-                    if isinstance(v, list):
-                        for y in v:
-                            if isinstance(y, str) and y:
-                                ids.add(_norm(y))
-
-    return ids
-
-
-# ============================================================
-# Cache builder
-# ============================================================
-
-@dataclass
-class CacheStats:
-    requested: int = 0
-    embedding_hits: int = 0
-    embedding_new: int = 0
-    resolved_hit_ok: int = 0
-    resolved_hit_failed: int = 0
-    resolved_new_ok: int = 0
-    resolved_new_failed: int = 0
-
-    def to_dict(self) -> Dict[str, float | int]:
-        hit_rate = (self.embedding_hits / self.requested) if self.requested else 0.0
-        resolve_ok = self.resolved_hit_ok + self.resolved_new_ok
-        resolve_rate = (resolve_ok / self.requested) if self.requested else 0.0
-        return {
-            "requested": self.requested,
-            "embedding_hits": self.embedding_hits,
-            "embedding_new": self.embedding_new,
-            "embedding_hit_rate": hit_rate,
-            "resolved_hit_ok": self.resolved_hit_ok,
-            "resolved_hit_failed": self.resolved_hit_failed,
-            "resolved_new_ok": self.resolved_new_ok,
-            "resolved_new_failed": self.resolved_new_failed,
-            "resolver_success_rate": resolve_rate,
-        }
-
-
-class FeverousCacheBuilder:
-    def __init__(
-        self,
-        *,
-        wiki_db_path: str | Path,
-        cache_db_path: str | Path,
-        model_name: str,
-        embed_batch_size: int,
-        include_context: bool,
-        clean_wiki: bool,
-        commit_every: int = 500,
-    ):
-        self.include_context = include_context
-        self.clean_wiki = clean_wiki
-        self.commit_every = commit_every
-
-        self.resolver = WikiSqliteResolver(wiki_db_path)
-        self.cache = EvidenceCacheDB(cache_db_path)
-        self.embedder = STEmbedder(model_name, batch_size=embed_batch_size)
-
-    def close(self) -> None:
-        self.resolver.close()
-        self.cache.conn.commit()
-        self.cache.close()
-
-    def ensure_cached(self, evidence_ids: Iterable[str]) -> CacheStats:
-        stats = CacheStats()
-        model = self.embedder.model_name
-
-        ids = [_norm(x) for x in evidence_ids if x]
-        ids = list(dict.fromkeys(ids))
-        stats.requested = len(ids)
-
-        # 1) embedding hits
-        to_process: List[str] = []
-        p = tqdm(ids, desc="🔎 Checking embedding cache", unit="id")
-        for eid in p:
-            if self.cache.has_embedding(eid, model):
-                stats.embedding_hits += 1
-            else:
-                to_process.append(eid)
-
-            # live counters
-            if (stats.embedding_hits + len(to_process)) % 500 == 0:
-                p.set_postfix_str(
-                    f"hit={stats.embedding_hits} miss={len(to_process)} hit_rate={(stats.embedding_hits / max(1, (stats.embedding_hits+len(to_process)))):.2%}"
-                )
-        p.close()
-
-        # 2) resolve missing embeddings
-        to_embed_ids: List[str] = []
-        to_embed_texts: List[str] = []
-        pending_ops = 0
-
-        p = tqdm(to_process, desc="🧩 Resolving IDs", unit="id")
-        for eid in p:
-            row = self.cache.get_resolved_row(eid)
-
-            if row and row["status"] == "ok":
-                stats.resolved_hit_ok += 1
-                text = row["text"] or ""
-                if is_valid_text(text):
-                    to_embed_ids.append(eid)
-                    to_embed_texts.append(text)
-                else:
-                    page_id, local_id = split_evidence_id(eid)
-                    self.cache.upsert_resolved_failed(eid, page_id or "", local_id or "", "cached_text_invalid")
-                    stats.resolved_new_failed += 1
-                continue
-
-            if row and row["status"] == "failed":
-                stats.resolved_hit_failed += 1
-                continue
-
-            page_id, local_id, text, err = self.resolver.resolve_evidence_id(eid)
-            if err:
-                self.cache.upsert_resolved_failed(eid, page_id or "", local_id or "", err)
-                stats.resolved_new_failed += 1
-                pending_ops += 1
-            else:
-                assert text is not None
-                cleaned = False
-                if self.clean_wiki:
-                    text = strip_wiki_markup(text)
-                    cleaned = True
-
-                if not is_valid_text(text):
-                    self.cache.upsert_resolved_failed(eid, page_id, local_id, "validation_failed")
-                    stats.resolved_new_failed += 1
-                    pending_ops += 1
-                else:
-                    self.cache.upsert_resolved_ok(eid, page_id, local_id, text, cleaned=cleaned)
-                    stats.resolved_new_ok += 1
-                    pending_ops += 1
-                    to_embed_ids.append(eid)
-                    to_embed_texts.append(text)
-
-            if pending_ops >= self.commit_every:
-                self.cache.conn.commit()
-                pending_ops = 0
-
-            if (stats.resolved_hit_ok + stats.resolved_new_ok + stats.resolved_new_failed) % 500 == 0:
-                p.set_postfix_str(
-                    f"ok(hit/new)={stats.resolved_hit_ok}/{stats.resolved_new_ok} fail(new)={stats.resolved_new_failed} queued_embed={len(to_embed_texts)}"
-                )
-
-        p.close()
-
-        if pending_ops:
-            self.cache.conn.commit()
-
-        # 3) embed + store (show progress by chunking)
-        if to_embed_texts:
-            bs = self.embedder.batch_size
-            p = tqdm(range(0, len(to_embed_texts), bs), desc="🧠 Embedding", unit="batch")
-            for i in p:
-                batch_texts = to_embed_texts[i : i + bs]
-                batch_ids = to_embed_ids[i : i + bs]
-                vecs = self.embedder.encode(batch_texts)
-
-                for eid, v in zip(batch_ids, vecs):
-                    self.cache.upsert_embedding(eid, model, v)
-                    stats.embedding_new += 1
-
-                if (i // bs) % 10 == 0:
-                    p.set_postfix_str(f"new_embeds={stats.embedding_new} dim={int(vecs.shape[1])}")
-
-            p.close()
-            self.cache.conn.commit()
-
-        return stats
-
-
-# ============================================================
-# Main
-# ============================================================
-
-def count_lines(path: str | Path) -> int:
-    n = 0
-    with open(path, "rb") as f:
-        for _ in f:
-            n += 1
-    return n
-
-def iter_jsonl(path: str | Path, limit: Optional[int] = None):
-    n = 0
+def iter_jsonl(path: str) -> Iterable[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
-
-            # Skip the schema/header line sometimes present in these files
-            if isinstance(obj, dict) and obj.get("id", None) == "" and obj.get("claim", "") == "" and obj.get("label", "") == "":
-                continue
-
-            yield obj
-            n += 1
-            if limit is not None and n >= limit:
-                return
+            yield json.loads(line)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", required=True, help="Path to FEVEROUS jsonl (dev challenges, dev, train, etc.)")
-    ap.add_argument("--wiki-db", required=True, help="Path to feverous_wikiv1.db (wiki(id,data))")
-    ap.add_argument("--cache-db", required=True, help="Path to cache db to create/use (resolved + embeddings)")
-    ap.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
-    ap.add_argument("--embed-batch-size", type=int, default=64)
-    ap.add_argument("--limit", type=int, default=None, help="Optional limit on number of examples to process")
-    ap.add_argument("--include-context", action="store_true", help="Also cache+embed context element IDs")
-    ap.add_argument("--no-clean", action="store_true", help="Do not strip simple wiki markup [[A|B]]")
-    ap.add_argument("--report-json", default=None, help="Optional path to write a JSON report")
-    args = ap.parse_args()
+def required_ids_for_evidence_set(eset: Dict[str, Any], include_context: bool) -> Set[str]:
+    req = set(eset.get("content", []))
+    if include_context:
+        ctx = eset.get("context", {}) or {}
+        for cid in list(req):
+            for x in ctx.get(cid, []) or []:
+                req.add(x)
+    return req
 
-    dataset = Path(args.dataset)
-    wiki_db = Path(args.wiki_db)
-    cache_db = Path(args.cache_db)
 
-    if not dataset.exists():
-        raise FileNotFoundError(dataset)
-    if not wiki_db.exists():
-        raise FileNotFoundError(wiki_db)
+def evidence_set_is_complete(eset: Dict[str, Any], cache: CacheDB, model: str, include_context: bool) -> bool:
+    req = required_ids_for_evidence_set(eset, include_context=include_context)
+    return all(cache.has_ok_embedding(eid, model) for eid in req)
 
+
+# ----------------------------
+# Embedder hook (plug in yours)
+# ----------------------------
+
+class Embedder:
+    """
+    Adapter around whatever you already use.
+    This version tries to import your HFEmbedder; if not available, falls back to sentence-transformers.
+    """
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+
+        self._impl = None
+        try:
+            # If your project has this
+            from verity_gate.embedder import HFEmbedder  # type: ignore
+            self._impl = HFEmbedder(model_name=model_name)
+        except Exception:
+            try:
+                from sentence_transformers import SentenceTransformer  # type: ignore
+                self._impl = SentenceTransformer(model_name)
+            except Exception as e:
+                raise RuntimeError(
+                    "No embedder found. Install sentence-transformers or ensure verity_gate.embedder.HFEmbedder is importable."
+                ) from e
+
+    def embed(self, texts: List[str]) -> np.ndarray:
+        if hasattr(self._impl, "embed"):
+            vecs = self._impl.embed(texts)
+            return np.asarray(vecs, dtype=np.float32)
+        # sentence-transformers
+        vecs = self._impl.encode(texts, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        return np.asarray(vecs, dtype=np.float32)
+
+
+# ----------------------------
+# Cache build + filtering
+# ----------------------------
+
+def collect_unique_ids(dataset_path: str, include_context: bool) -> Tuple[int, Set[str]]:
+    n = 0
+    ids: Set[str] = set()
+    for ex in iter_jsonl(dataset_path):
+        n += 1
+        for eset in ex.get("evidence", []) or []:
+            ids.update(eset.get("content", []) or [])
+            if include_context:
+                ctx = eset.get("context", {}) or {}
+                for cid in eset.get("content", []) or []:
+                    ids.update(ctx.get(cid, []) or [])
+    return n, ids
+
+
+def build_cache(
+    dataset_path: str,
+    wiki_db_path: str,
+    cache_db_path: str,
+    model_name: str,
+    include_context: bool,
+    batch_size: int = 64,
+) -> Dict[str, Any]:
     t0 = time.time()
 
-    # collect ids
-    total_lines = count_lines(dataset)
-    print(f"Dataset lines (approx): {total_lines}")
+    examples_seen, unique_ids = collect_unique_ids(dataset_path, include_context=include_context)
+    ids_list = sorted(unique_ids)
 
-    all_ids: Set[str] = set()
-    examples = 0
+    wiki = WikiDB(wiki_db_path)
+    resolver = WikiResolver(wiki)
+    cache = CacheDB(cache_db_path)
+    embedder = Embedder(model_name)
 
-    p = tqdm(iter_jsonl(dataset, limit=args.limit), total=(args.limit or total_lines), desc="📄 Scanning dataset", unit="ex")
-    for ex in p:
-        examples += 1
-        all_ids |= collect_evidence_ids(ex, include_context=args.include_context)
-        if examples % 200 == 0:
-            p.set_postfix_str(f"examples={examples} unique_ids={len(all_ids)}")
-    p.close()
+    hits = 0
+    new_ok = 0
+    new_fail = 0
 
-    t1 = time.time()
+    pending_ids: List[str] = []
+    pending_texts: List[str] = []
 
-    builder = FeverousCacheBuilder(
-        wiki_db_path=wiki_db,
-        cache_db_path=cache_db,
-        model_name=args.model,
-        embed_batch_size=args.embed_batch_size,
-        include_context=args.include_context,
-        clean_wiki=(not args.no_clean),
-    )
+    t_resolve_embed0 = time.time()
+    for eid in tqdm(ids_list, desc="Resolve+Embed (cached)", total=len(ids_list)):
+        if cache.has_embedding(eid, model_name):
+            hits += 1
+            continue
 
-    stats = builder.ensure_cached(all_ids)
-    builder.close()
+        txt = resolver.resolve_text(eid)
+        if not txt:
+            cache.put_resolved_fail(eid, "resolve_failed")
+            new_fail += 1
+            continue
 
-    t2 = time.time()
+        cache.put_resolved_ok(eid, txt)
+        pending_ids.append(eid)
+        pending_texts.append(txt)
+        new_ok += 1
 
-    report = {
-        "dataset": str(dataset),
-        "wiki_db": str(wiki_db),
-        "cache_db": str(cache_db),
-        "model": args.model,
-        "include_context": bool(args.include_context),
-        "examples_seen": examples,
-        "unique_element_ids": len(all_ids),
+        if len(pending_ids) >= batch_size:
+            vecs = embedder.embed(pending_texts)
+            cache.put_embeddings(pending_ids, vecs, model_name)
+            cache.conn.commit()
+            pending_ids.clear()
+            pending_texts.clear()
+
+    if pending_ids:
+        vecs = embedder.embed(pending_texts)
+        cache.put_embeddings(pending_ids, vecs, model_name)
+        cache.conn.commit()
+
+    t_resolve_embed = time.time() - t_resolve_embed0
+
+    wiki.close()
+    cache.close()
+
+    return {
+        "dataset": dataset_path,
+        "wiki_db": wiki_db_path,
+        "cache_db": cache_db_path,
+        "model": model_name,
+        "include_context": include_context,
+        "examples_seen": examples_seen,
+        "unique_element_ids": len(ids_list),
         "timing_seconds": {
-            "collect_ids": round(t1 - t0, 3),
-            "resolve_embed_cache": round(t2 - t1, 3),
-            "total": round(t2 - t0, 3),
+            "resolve_embed_cache": round(t_resolve_embed, 3),
+            "total": round(time.time() - t0, 3),
         },
-        "stats": stats.to_dict(),
+        "stats": {
+            "requested": len(ids_list),
+            "embedding_hits": hits,
+            "embedding_new": new_ok,
+            "embedding_hit_rate": float(hits / max(1, len(ids_list))),
+            "resolved_new_ok": new_ok,
+            "resolved_new_failed": new_fail,
+            "resolver_success_rate": float(new_ok / max(1, new_ok + new_fail)),
+        },
     }
 
-    print("\n==== FEVEROUS CACHE BUILD REPORT ====")
-    print(json.dumps(report, indent=2, ensure_ascii=False))
 
-    if args.report_json:
-        out = Path(args.report_json)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"\nWrote report -> {out}")
+def filter_complete_dataset(
+    dataset_path: str,
+    out_path: str,
+    cache_db_path: str,
+    model_name: str,
+    include_context: bool,
+    keep_mode: str = "any_set",
+) -> Dict[str, Any]:
+    """
+    keep_mode:
+      - "any_set": keep claim if >=1 evidence set complete; drop incomplete sets
+      - "all_sets": keep claim only if ALL sets complete (very strict)
+    """
+    cache = CacheDB(cache_db_path)
 
-    return 0
+    kept_claims = 0
+    dropped_claims = 0
+    kept_sets = 0
+    dropped_sets = 0
+
+    with open(out_path, "w", encoding="utf-8") as w:
+        for ex in tqdm(list(iter_jsonl(dataset_path)), desc="Filter complete", total=None):
+            ev = ex.get("evidence", []) or []
+            complete_sets = []
+            for eset in ev:
+                if evidence_set_is_complete(eset, cache, model_name, include_context=include_context):
+                    complete_sets.append(eset)
+                else:
+                    dropped_sets += 1
+
+            if keep_mode == "all_sets":
+                ok = (len(complete_sets) == len(ev)) and len(ev) > 0
+            else:  # any_set
+                ok = len(complete_sets) > 0
+
+            if ok:
+                kept_claims += 1
+                kept_sets += len(complete_sets)
+                ex2 = dict(ex)
+                ex2["evidence"] = complete_sets
+                w.write(json.dumps(ex2, ensure_ascii=False) + "\n")
+            else:
+                dropped_claims += 1
+
+    cache.close()
+
+    return {
+        "dataset_in": dataset_path,
+        "dataset_out": out_path,
+        "cache_db": cache_db_path,
+        "model": model_name,
+        "include_context": include_context,
+        "keep_mode": keep_mode,
+        "kept_claims": kept_claims,
+        "dropped_claims": dropped_claims,
+        "kept_evidence_sets": kept_sets,
+        "dropped_evidence_sets": dropped_sets,
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dataset", required=True)
+    ap.add_argument("--wiki_db", required=True)
+    ap.add_argument("--cache_db", required=True)
+    ap.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
+    ap.add_argument("--include_context", action="store_true")
+    ap.add_argument("--batch_size", type=int, default=64)
+
+    ap.add_argument("--filter_out", default=None, help="If set, write filtered JSONL containing only complete evidence sets.")
+    ap.add_argument("--keep_mode", default="any_set", choices=["any_set", "all_sets"])
+
+    args = ap.parse_args()
+
+    report = build_cache(
+        dataset_path=args.dataset,
+        wiki_db_path=args.wiki_db,
+        cache_db_path=args.cache_db,
+        model_name=args.model,
+        include_context=args.include_context,
+        batch_size=args.batch_size,
+    )
+    print("==== FEVEROUS CACHE BUILD REPORT ====")
+    print(json.dumps(report, indent=2))
+
+    if args.filter_out:
+        frep = filter_complete_dataset(
+            dataset_path=args.dataset,
+            out_path=args.filter_out,
+            cache_db_path=args.cache_db,
+            model_name=args.model,
+            include_context=args.include_context,
+            keep_mode=args.keep_mode,
+        )
+        print("==== FEVEROUS COMPLETE-FILTER REPORT ====")
+        print(json.dumps(frep, indent=2))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
