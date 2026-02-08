@@ -1,11 +1,11 @@
 python .\scripts\gate_suite.py `
   --kind feverous `
   --in_path .\datasets\feverous\feverous_dev_challenges.jsonl `
-  --n 1000 --seed 1337 `
+  --top_k 10 --seed 1337 `
   --cal_frac 0.5 `
   --far 0.01 `
   --neg_mode deranged `
   --out_report .\artifacts\feverous_negcal.json `
-  --out_scored_pos .\artifacts\feverous_scored_pos.jsonl `
-  --out_scored_neg .\artifacts\feverous_scored_neg.jsonl `
-  --plot_png .\artifacts\feverous_sep.png
+  --out_pos_scored .\artifacts\feverous_scored_pos.jsonl `
+  --out_neg_scored .\artifacts\feverous_scored_neg.jsonl `
+  --out_plot .\artifacts\feverous_sep.png
