@@ -9,6 +9,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from feverous_wiki_resolver import FeverousWikiDB
+
 import numpy as np
 from tqdm import tqdm
 
@@ -475,8 +477,8 @@ def build_cache(
     examples_seen, unique_ids = collect_unique_ids(dataset_path, include_context=include_context)
     ids_list = sorted(unique_ids)
 
-    wiki = WikiDB(wiki_db_path)
-    resolver = WikiResolver(wiki)
+    wiki = FeverousWikiDB(wiki_db_path)
+    resolver = wiki 
     cache = CacheDB(cache_db_path)
     embedder = Embedder(model_name)
 
@@ -488,14 +490,28 @@ def build_cache(
     pending_texts: List[str] = []
 
     t_resolve_embed0 = time.time()
-    for eid in tqdm(ids_list, desc="Resolve+Embed (cached)", total=len(ids_list)):
+    pbar = tqdm(ids_list, desc="Resolve+Embed (cached)", total=len(ids_list))
+    for eid in pbar:
         if cache.has_embedding(eid, model_name):
             hits += 1
+            if (hits + new_ok + new_fail) % 500 == 0:
+                resolved = new_ok + new_fail
+                pbar.set_postfix({
+                    "hit": hits,
+                    "ok": new_ok,
+                    "fail": new_fail,
+                    "succ%": round(100.0 * new_ok / max(1, resolved), 2),
+                })
             continue
 
-        txt = resolver.resolve_text(eid)
-        if not txt:
-            cache.put_resolved_fail(eid, "resolve_failed")
+        res = resolver.resolve_text(eid)
+        if isinstance(res, tuple):
+            ok, txt, err = res
+        else:
+            ok, txt, err = (res is not None and str(res).strip() != ""), res, None
+
+        if not ok or not txt:
+            cache.put_resolved_fail(eid, err or "resolve_failed")
             new_fail += 1
             continue
 
@@ -503,6 +519,16 @@ def build_cache(
         pending_ids.append(eid)
         pending_texts.append(txt)
         new_ok += 1
+
+        # Periodically update progress bar with live rates
+        if (hits + new_ok + new_fail) % 250 == 0:
+            resolved = new_ok + new_fail
+            pbar.set_postfix({
+                "hit": hits,
+                "ok": new_ok,
+                "fail": new_fail,
+                "succ%": round(100.0 * new_ok / max(1, resolved), 2),
+            })
 
         if len(pending_ids) >= batch_size:
             vecs = embedder.embed(pending_texts)
@@ -518,7 +544,7 @@ def build_cache(
 
     t_resolve_embed = time.time() - t_resolve_embed0
 
-    wiki.close()
+    # wiki.close()
     cache.close()
 
     return {

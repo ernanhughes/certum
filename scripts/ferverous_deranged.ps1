@@ -1,3 +1,7 @@
+# This script runs the "deranged" negative sampling regime on the Feverous dataset.
+$ErrorActionPreference = "Stop"
+New-Item -ItemType Directory -Force "artifacts" | Out-Null
+
 py scripts\gate_suite.py `
   --kind feverous `
   --in_path E:\data\feverous_dev_complete.jsonl `
@@ -7,6 +11,8 @@ py scripts\gate_suite.py `
   --far 0.01 `
   --cal_frac 0.5 `
   --neg_mode deranged `
+  --n 4000 `
+  --seed 1337 `
   --out_report artifacts\feverous_negcal_deranged.json `
   --out_pos_scored artifacts\pos_deranged.jsonl `
   --out_neg_scored artifacts\neg_deranged.jsonl `
