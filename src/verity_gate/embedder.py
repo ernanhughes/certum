@@ -1,9 +1,7 @@
-# src/verity_gate/embedder.py
-from sentence_transformers import SentenceTransformer
 import numpy as np
+from sentence_transformers import SentenceTransformer
 
 class HFEmbedder:
-    # def __init__(self, model_name="all-MiniLM-L6-v2"):
     def __init__(self, model_name="all-mpnet-base-v2"):
         self.model = SentenceTransformer(model_name)
 

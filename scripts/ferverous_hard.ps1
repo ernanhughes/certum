@@ -12,7 +12,7 @@ py scripts\gate_suite.py `
   --neg_mode hard_mined `
   --n 4000 `
   --seed 1337 `
-  --out_report artifacts\feverous_hard.json `
+  --out_report artifacts\feverous_negcal_hard.json `
   --out_pos_scored artifacts\pos_hard.jsonl `
   --out_neg_scored artifacts\neg_hard.jsonl `
   --plot_png artifacts\hard.png

@@ -3,6 +3,7 @@
 *.json
 *.png
 *.zip
+*.md
 datasets/
 
 # Byte-compiled / optimized / DLL files
