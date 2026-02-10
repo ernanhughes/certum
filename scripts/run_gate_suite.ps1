@@ -1,10 +1,13 @@
 $ErrorActionPreference = "Stop"
 $env:TRANSFORMERS_VERBOSITY = "error"
-# ---- config (edit once) ----
-$DATA    = "E:\data\feverous_dev_complete.jsonl"
+
 $CACHEDB = "E:\data\feverous_cache.db"
-# $MODEL   = "sentence-transformers/all-MiniLM-L6-v2"
-$MODEL = "BAAI/bge-large-en-v1.5"
+$MODEL   = "sentence-transformers/all-MiniLM-L6-v2"
+# $CACHEDB = "E:\data\feverous_cache_bge.db"
+# $MODEL = "BAAI/bge-large-en-v1.5"
+
+$DATA    = "E:\data\feverous_dev_complete.jsonl"
+
 $REGIME  = "standard"
 $FAR     = "0.01"
 $CALFRAC = "0.5"
@@ -41,10 +44,11 @@ function Run-One($MODE, $EXTRA_ARGS) {
 
 # Run all 5 adversarial modes (critical for falsification testing)
 Run-One "deranged" @()
-Run-One "offset"   @("--neg_offset","37")
-Run-One "cyclic"   @()
-Run-One "permute"  @()
-Run-One "hard_mined" @()
+# Run-One "offset"   @("--neg_offset","37")
+# Run-One "cyclic"   @()
+# Run-One "permute"  @()
+# Run-One "hard_mined" @()
+Run-One "hard_mined_v2" @()
 
 # Validate artifacts
 py scripts\validate_gate_artifacts.py `

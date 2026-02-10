@@ -20,6 +20,7 @@ class AdversarialPairGenerator(ABC):
         *,
         seed: int,
         embedder: Optional[Any] = None,
+        energy_computer: Optional[Any] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         pass
 
@@ -98,6 +99,7 @@ class DerangedPairGenerator(AdversarialPairGenerator):
         *,
         seed: int,
         embedder: Optional[Any] = None,
+        energy_computer: Optional[Any] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         n = len(pairs)
         if n <= 1:
@@ -120,7 +122,14 @@ class CyclicPairGenerator(AdversarialPairGenerator):
     def name(self) -> str:
         return "cyclic"
 
-    def generate(self, pairs, *, seed: int, embedder=None):
+    def generate(
+        self,
+        pairs: List[Dict[str, Any]],
+        *,
+        seed: int,
+        embedder: Optional[Any] = None,
+        energy_computer: Optional[Any] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         n = len(pairs)
         if n == 0:
             return [], {"mode": "cyclic", "n": 0, "fixed_points": 0, "note": "empty"}
@@ -141,7 +150,14 @@ class OffsetPairGenerator(AdversarialPairGenerator):
     def name(self) -> str:
         return f"offset_{self.offset}"
 
-    def generate(self, pairs, *, seed: int, embedder=None):
+    def generate(
+        self,
+        pairs: List[Dict[str, Any]],
+        *,
+        seed: int,
+        embedder: Optional[Any] = None,
+        energy_computer: Optional[Any] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         n = len(pairs)
         if n == 0:
             return [], {"mode": "offset", "n": 0, "requested_offset": self.offset, "effective_offset": 0, "fixed_points": 0, "note": "empty"}
@@ -178,6 +194,7 @@ class PermutePairGenerator(AdversarialPairGenerator):
         *,
         seed: int,
         embedder: Optional[Any] = None,
+        energy_computer: Optional[Any] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         n = len(pairs)
         rng = random.Random(seed)
@@ -199,6 +216,7 @@ class HardMinedPairGenerator(AdversarialPairGenerator):
         *,
         seed: int,
         embedder: Optional[Any] = None,
+        energy_computer: Optional[Any] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         if embedder is None:
             raise ValueError("hard_mined requires embedder")
@@ -241,5 +259,118 @@ class HardMinedPairGenerator(AdversarialPairGenerator):
             "n": len(pairs),
             "candidates": len(valid),
             "method": "argmax cosine(claim, evidence_centroid)",
+        }
+        return negs, meta
+
+class HardMinedPairGeneratorV2(AdversarialPairGenerator):
+    """Hard negatives that MINIMIZE hallucination energy (true adversarial for your metric)."""
+    
+    def __init__(self, top_candidates: int = 16):
+        self.top_candidates = top_candidates
+    
+    @property
+    def name(self) -> str:
+        return "hard_mined_v2"
+    
+    def generate(
+        self,
+        pairs: List[Dict[str, Any]],
+        *,
+        seed: int,
+        embedder: Optional[Any] = None,
+        energy_computer: Optional[Any] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        if embedder is None or energy_computer is None:
+            raise ValueError("hard_mined_v2 requires embedder and energy_computer")
+        
+        n = len(pairs)
+        if n < 2:
+            return [], {"mode": "hard_mined_v2", "n": n, "error": "insufficient_samples"}
+        
+        # Precompute claim vectors + evidence centroids
+        claim_vecs = _unit_norm_rows(np.asarray(embedder.embed([p["claim"] for p in pairs]), dtype=np.float32))
+        centroids = []
+        ev_vecs_list = []
+        valid_indices = []
+        
+        for i, p in enumerate(pairs):
+            ev = p.get("evidence_vecs")
+            if ev is None or len(ev) == 0:
+                continue
+            ev_arr = np.asarray(ev, dtype=np.float32)
+            if ev_arr.ndim != 2:
+                continue
+            ev_norm = _unit_norm_rows(ev_arr)
+            centroid = _unit_norm(ev_norm.mean(axis=0))
+            if np.isfinite(centroid).all():
+                centroids.append(centroid)
+                ev_vecs_list.append(ev_norm)
+                valid_indices.append(i)
+        
+        if len(valid_indices) < 2:
+            # Fallback to deranged if insufficient valid evidence
+            return DerangedPairGenerator().generate(pairs, seed=seed)
+        
+        centroid_mat = _unit_norm_rows(np.stack(centroids))  # (m, d)
+        sim = claim_vecs @ centroid_mat.T  # (n, m)
+        
+        rng = np.random.default_rng(seed)
+        chosen_js = []
+        chosen_energies = []
+        
+        K = min(self.top_candidates, len(valid_indices))
+        
+        for i in range(n):
+            # Shortlist top-K candidates by centroid similarity
+            idx = np.argpartition(-sim[i], K - 1)[:K]
+            
+            # Find candidate with MINIMUM energy (true adversarial)
+            best_j = None
+            best_e = float("inf")
+            
+            for cand_pos in idx:
+                j_idx = valid_indices[int(cand_pos)]
+                if j_idx == i:  # Skip self
+                    continue
+                
+                # Compute actual energy with mismatched evidence
+                e = energy_computer.compute(
+                    claim_vecs[i], 
+                    ev_vecs_list[valid_indices.index(j_idx)]
+                ).energy
+                
+                if e < best_e:
+                    best_e = e
+                    best_j = j_idx
+            
+            # Fallback if no candidate found (rare)
+            if best_j is None:
+                best_j = valid_indices[int(rng.integers(0, len(valid_indices)))]
+                best_e = 1.0
+            
+            chosen_js.append(best_j)
+            chosen_energies.append(best_e)
+        
+        # Construct negative pairs
+        negs = []
+        for i in range(n):
+            src = pairs[chosen_js[i]]
+            negs.append({
+                "id": pairs[i].get("id", i),
+                "claim": pairs[i]["claim"],
+                "evidence": src.get("evidence", []),
+                "evidence_texts": src.get("evidence_texts", []),
+                "evidence_vecs": src.get("evidence_vecs"),  # Critical: reuse vectors
+                "label": "NEG_HARD_V2",
+            })
+        
+        meta = {
+            "mode": "hard_mined_v2",
+            "n": n,
+            "candidates": len(valid_indices),
+            "top_candidates": K,
+            "mean_energy": float(np.mean(chosen_energies)),
+            "min_energy": float(np.min(chosen_energies)),
+            "max_energy": float(np.max(chosen_energies)),
         }
         return negs, meta

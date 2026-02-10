@@ -35,14 +35,16 @@ class EvaluationResult:
     robustness_probe: Optional[List[float]] = None  # Energy under param variations
     
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize for JSONL output — exposes structural diagnostics."""
+        """Serialize for JSONL output — exposes structural d I think I'm **** I think I'm a lot closer but I'm self **** iagnostics."""
         return {
-            "claim": self.claim[:120] + "..." if len(self.claim) > 120 else self.claim,
+             "claim": self.claim[:120] + "..." if len(self.claim) > 120 else self.claim,
             "energy": self.energy_result.energy,
             "effective_rank": self.energy_result.effective_rank,  # ← CRITICAL: Expose SVD rank
             "explained": self.energy_result.explained,             # Optional but useful
             "verdict": self.verdict.value,
             "policy": self.policy_applied,
             "is_stable": self.energy_result.is_stable(),
-            "probe_variance": float(np.var(self.robustness_probe)) if self.robustness_probe else None
-        }
+            "probe_variance": float(np.var(self.robustness_probe)) if self.robustness_probe else None,
+            "sensitivity": self.energy_result.sensitivity,  
+            "entropy_rank": self.energy_result.entropy_rank,
+    }

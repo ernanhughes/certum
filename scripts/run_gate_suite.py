@@ -20,7 +20,7 @@ from dpgss.gate import VerifiabilityGate
 from dpgss.calibration import AdaptiveCalibrator
 from dpgss.audit import AuditLogger
 from dpgss.adversarial import (
-    DerangedPairGenerator, OffsetPairGenerator, CyclicPairGenerator,
+    DerangedPairGenerator, HardMinedPairGeneratorV2, OffsetPairGenerator, CyclicPairGenerator,
     PermutePairGenerator, HardMinedPairGenerator, AdversarialPairGenerator
 )
 from dpgss.dataset import load_examples
@@ -41,6 +41,8 @@ def get_adversarial_generator(mode: str, **kwargs) -> AdversarialPairGenerator:
         return PermutePairGenerator()
     elif mode == "hard_mined":
         return HardMinedPairGenerator()
+    elif mode == "hard_mined_v2":
+        return HardMinedPairGeneratorV2()
     else:
         raise ValueError(f"Unknown neg_mode: {mode}")
 
@@ -85,6 +87,8 @@ def run_gate_suite(
     
     # 2. Build gate
     embedder = HFEmbedder(model_name=model_name)
+    ensure_vectors(samples, embedder)  
+
     energy_computer = HallucinationEnergyComputer(top_k=12, rank_r=8)
     gate = VerifiabilityGate(embedder, energy_computer)
     
@@ -103,7 +107,7 @@ def run_gate_suite(
         neg_mode=neg_mode,
         neg_offset=neg_offset or 37,
         seed=seed,
-        claim_vec_cache=claim_vec_cache
+        claim_vec_cache=claim_vec_cache,
     )
 
     # 4. Get policy calibrated on NEGATIVE energies
@@ -115,7 +119,8 @@ def run_gate_suite(
     
     policy = AdaptivePercentilePolicy(
         percentile=int(far * 100),
-        calibration_energies=sweep_results["neg_energies"]
+        calibration_energies=sweep_results["neg_energies"],
+        hard_negative_gap=sweep_results["hard_negative_gap"],
     )    
 
     # 5. Evaluate POSITIVE samples
@@ -137,6 +142,7 @@ def run_gate_suite(
         pairs=eval_samples,
         seed=seed,
         embedder=embedder,   # required for hard_mined
+        energy_computer=energy_computer,  # Required for hard_mined_v2
     )
 
     neg_results = []
@@ -205,6 +211,13 @@ def run_gate_suite(
             tau=tau  # Pass calibrated tau for visualization
         )    
 
+def ensure_vectors(samples, embedder):
+    for s in samples:
+        if "evidence_vecs" not in s or s["evidence_vecs"] is None:
+            s["evidence_vecs"] = embedder.embed(s["evidence"])
+        if "claim_vec" not in s:
+            s["claim_vec"] = embedder.embed([s["claim"]])[0]
+
 def resolve_vectors(sample, embedder, claim_cache):
     claim = sample["claim"]
 
@@ -236,7 +249,8 @@ def main():
     ap.add_argument("--n", type=int, default=4000)
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--neg_mode", required=True, 
-                    choices=["deranged", "offset", "cyclic", "permute", "hard_mined"])
+                    choices=["deranged", "offset", "cyclic", "permute", "hard_mined", "hard_mined_v2"],
+                    help="Method for generating negative samples for calibration and evaluation.")
     ap.add_argument("--neg_offset", type=int, default=37)
     ap.add_argument("--out_report", type=Path, required=True)
     ap.add_argument("--out_pos_scored", type=Path, required=True)

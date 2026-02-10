@@ -1,9 +1,8 @@
 # src/dpgss/calibration.py
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 import random
 import numpy as np
 
-from dpgss.core_energy import compute_energy_core
 from dpgss.energy import HallucinationEnergyComputer
 from .embedder import Embedder
 from .gate import VerifiabilityGate
@@ -18,26 +17,99 @@ class AdaptiveCalibrator:
         self.gate = gate
         self.embedder = embedder
     
+    def run_sweep(
+        self,
+        claims: List[str],
+        evidence_sets: List[List[str]],
+        evidence_vecs: List[np.ndarray],
+        percentiles: List[int] = [1, 5, 10, 20, 30],
+        neg_mode: str = "deranged",
+        neg_offset: int = 37,
+        seed: int = 1337,
+        claim_vec_cache: Dict[str, np.ndarray] = None,
+    ) -> Dict[str, Any]:
+        # 1. Compute energies on POSITIVE samples
+        pos_energies = []
+        for claim, ev in zip(claims, evidence_vecs):
+            energy = self.gate.energy_computer.compute(
+                claim_vec=self.embedder.embed([claim])[0],
+                evidence_vecs=ev,
+            ).energy
+            pos_energies.append(energy)
+        
+        # 2. Compute NEGATIVE energies (easy baseline: deranged)
+        neg_energies_deranged = self._compute_neg_energies(
+            claims=claims,
+            evidence_sets=evidence_sets,
+            evidence_vecs=evidence_vecs,
+            neg_mode="deranged",
+            neg_offset=neg_offset,
+            seed=seed,
+            claim_vec_cache=claim_vec_cache,
+        )
+
+        # 3. Compute NEGATIVE energies (hard baseline)
+        neg_energies_hard = self._compute_neg_energies(
+            claims=claims,
+            evidence_sets=evidence_sets,
+            evidence_vecs=evidence_vecs,
+            neg_mode="hard_mined_v2",
+            neg_offset=neg_offset,
+            seed=seed,
+            claim_vec_cache=claim_vec_cache,
+        )
+        
+        if len(neg_energies_deranged) < 10 or len(neg_energies_hard) < 10:
+            raise ValueError(
+                "Insufficient negative samples for hard-negative gap calibration."
+            )
+        
+        hard_negative_gap = float(
+            np.mean(neg_energies_hard) - np.mean(neg_energies_deranged)
+        )
+        hard_negative_gap_norm = hard_negative_gap / max(
+            1e-6, np.std(neg_energies_deranged)
+        )
+
+        
+        # 4-5. Calibrate thresholds + compute separation (unchanged)
+        tau_by_percentile = {p: float(np.percentile(neg_energies_hard, p)) for p in percentiles}
+        separation_delta = np.mean(neg_energies_hard) - np.mean(pos_energies) if pos_energies and neg_energies_hard else 0.0
+        
+        return {
+            "tau_by_percentile": tau_by_percentile,
+            "pos_energies": pos_energies,
+            "neg_energies": neg_energies_hard,
+            "separation_delta": separation_delta,
+            "sample_count": len(pos_energies),
+            "neg_sample_count": len(neg_energies_hard),
+            "neg_mode": neg_mode,
+            "hard_negative_gap": hard_negative_gap,
+            "hard_negative_gap_norm": hard_negative_gap_norm,
+        }    
+
     def _generate_negatives(
         self,
         claims: List[str],
         evidence_sets: List[List[str]],
+        evidence_vecs_list: List[np.ndarray],  # ← NEW: precomputed evidence vectors
         mode: str = "deranged",
         offset: int = 37,
         seed: int = 1337,
-    ) -> List[Tuple[str, List[str]]]:
+        energy_computer: Optional[HallucinationEnergyComputer] = None,  # ← NEW
+    ) -> List[Tuple[str, List[str], np.ndarray]]:  # ← Returns (claim, evidence_texts, evidence_vecs)
         """
-        Generate adversarial negative samples by mismatching claims with non-corresponding evidence.
+        Generate adversarial negative samples.
         
         Returns:
-            List of (claim, mismatched_evidence) tuples where claim and evidence are deliberately mismatched.
+            List of (claim, mismatched_evidence_texts, mismatched_evidence_vecs) tuples.
         """
         n = len(claims)
         if n == 0:
             return []
         if n == 1:
             # Cannot create meaningful negative with single sample
-            return [(claims[0], evidence_sets[0])]  # Fallback (will be filtered later)
+            return [(claims[0], evidence_sets[0], evidence_vecs_list[0])]
         
         rng = random.Random(seed)
         idx = list(range(n))
@@ -57,69 +129,146 @@ class AdaptiveCalibrator:
             else:  # "deranged" (default)
                 perm = self._derangement_indices(n, rng)
             
-            # Construct mismatched pairs: claim[i] + evidence[perm[i]]
             negatives = [
-                (claims[i], evidence_sets[perm[i]])
+                (claims[i], evidence_sets[perm[i]], evidence_vecs_list[perm[i]])
                 for i in idx
-                if i != perm[i]  # Skip accidental fixed points (except for permute mode)
+                if i != perm[i]
             ]
             return negatives
         
         # ------------------------------------------------------------
-        # Hard-mined negatives: select evidence most similar to claim
-        # (creates hardest possible negatives for calibration)
+        # Hard-mined v1: centroid cosine similarity (existing behavior)
         # ------------------------------------------------------------
         elif mode == "hard_mined":
             # Compute claim embeddings
-            claim_vecs = self.embedder.embed(claims)  # (n, d)
+            claim_vecs = self.embedder.embed(claims)
             claim_vecs = self._unit_norm_rows(claim_vecs)
             
             # Compute evidence centroids
             centroids = []
             valid_indices = []
-            for i, evidence in enumerate(evidence_sets):
-                if not evidence:
+            for i, ev_vecs in enumerate(evidence_vecs_list):
+                if ev_vecs.size == 0:
                     continue
-                ev_vecs = self.embedder.embed(evidence)  # (m, d)
-                ev_vecs = self._unit_norm_rows(ev_vecs)
-                centroid = self._unit_norm(ev_vecs.mean(axis=0))
+                ev_norm = self._unit_norm_rows(ev_vecs)
+                centroid = self._unit_norm(ev_norm.mean(axis=0))
                 if np.isfinite(centroid).all():
                     centroids.append(centroid)
                     valid_indices.append(i)
             
             if len(centroids) < 2:
-                # Fallback to deranged if insufficient valid evidence
-                return self._generate_negatives(claims, evidence_sets, mode="deranged", seed=seed)
+                return self._generate_negatives(
+                    claims, evidence_sets, evidence_vecs_list,
+                    mode="deranged", seed=seed
+                )
             
-            # Compute similarity matrix: claims × evidence centroids
-            centroid_mat = np.stack(centroids, axis=0)  # (k, d)
+            centroid_mat = np.stack(centroids)
             centroid_mat = self._unit_norm_rows(centroid_mat)
-            sim = claim_vecs @ centroid_mat.T  # (n, k)
+            sim = claim_vecs @ centroid_mat.T
             
-            # For each claim, find most similar evidence that ISN'T its own
             negatives = []
             for i in range(n):
                 if i not in valid_indices:
                     continue
                 
-                # Exclude self-similarity to force mismatch
+                # Exclude self-similarity
                 self_pos = valid_indices.index(i) if i in valid_indices else -1
                 if self_pos >= 0:
                     sim[i, self_pos] = -np.inf
                 
-                # Select evidence with highest similarity (hard negative)
                 best_idx = int(np.argmax(sim[i]))
                 best_evidence_idx = valid_indices[best_idx]
-                negatives.append((claims[i], evidence_sets[best_evidence_idx]))
+                negatives.append((
+                    claims[i],
+                    evidence_sets[best_evidence_idx],
+                    evidence_vecs_list[best_evidence_idx]
+                ))
+            
+            return negatives
+        
+        # ------------------------------------------------------------
+        # Hard-mined v2: ENERGY-AWARE MINING (NEW)
+        # Select mismatched evidence that MINIMIZES hallucination energy
+        # ------------------------------------------------------------
+        elif mode == "hard_mined_v2":
+            if energy_computer is None:
+                raise ValueError(
+                    "hard_mined_v2 requires energy_computer parameter. "
+                    "Pass gate.energy_computer to _generate_negatives()."
+                )
+            
+            # Precompute claim vectors
+            claim_vecs = self._unit_norm_rows(np.asarray(
+                self.embedder.embed(claims), dtype=np.float32
+            ))
+            
+            # Build evidence index (skip empty evidence)
+            valid_indices = []
+            ev_vecs_norm = []
+            for i, ev in enumerate(evidence_vecs_list):
+                if ev.size == 0:
+                    continue
+                ev_norm = self._unit_norm_rows(np.asarray(ev, dtype=np.float32))
+                if ev_norm.shape[0] > 0:
+                    valid_indices.append(i)
+                    ev_vecs_norm.append(ev_norm)
+            
+            if len(valid_indices) < 2:
+                return self._generate_negatives(
+                    claims, evidence_sets, evidence_vecs_list,
+                    mode="deranged", seed=seed
+                )
+            
+            # Shortlist candidates by centroid similarity (fast filter)
+            centroids = [self._unit_norm(ev.mean(axis=0)) for ev in ev_vecs_norm]
+            centroid_mat = self._unit_norm_rows(np.stack(centroids))
+            sim = claim_vecs @ centroid_mat.T  # (n, m)
+            
+            negatives = []
+            K = min(16, len(valid_indices))  # Top-16 candidates
+            
+            for i in range(n):
+                # Shortlist top-K candidates by centroid similarity
+                idx = np.argpartition(-sim[i], K - 1)[:K]
+                
+                # Find candidate with MINIMUM energy (true adversarial)
+                best_j = None
+                best_e = float("inf")
+                
+                for cand_pos in idx:
+                    j_idx = valid_indices[int(cand_pos)]
+                    if j_idx == i:  # Skip self
+                        continue
+                    
+                    # Compute ACTUAL energy with mismatched evidence
+                    e = energy_computer.compute(
+                        claim_vec=claim_vecs[i],
+                        evidence_vecs=ev_vecs_norm[valid_indices.index(j_idx)]
+                    ).energy
+                    
+                    if e < best_e:
+                        best_e = e
+                        best_j = j_idx
+                
+                # Fallback if no candidate found (shouldn't happen with K>=2)
+                if best_j is None:
+                    best_j = valid_indices[int(rng.randint(0, len(valid_indices) - 1))]
+                    best_e = 1.0
+                
+                negatives.append((
+                    claims[i],
+                    evidence_sets[best_j],
+                    evidence_vecs_list[best_j]
+                ))
             
             return negatives
         
         else:
             raise ValueError(
                 f"Unknown neg_mode: '{mode}'. "
-                "Valid modes: deranged, offset, cyclic, permute, hard_mined"
-            )
-    
+                "Valid modes: deranged, offset, cyclic, permute, hard_mined, hard_mined_v2"
+            )    
+
     def _derangement_indices(self, n: int, rng: random.Random) -> List[int]:
         """
         Generate a true derangement (permutation with zero fixed points).
@@ -150,95 +299,48 @@ class AdaptiveCalibrator:
         norms = np.linalg.norm(X, axis=1, keepdims=True)
         norms = np.where(norms < eps, 1.0, norms)
         return X / norms
-    
-    def run_sweep(
+
+    def _compute_neg_energies(
         self,
         claims: List[str],
         evidence_sets: List[List[str]],
         evidence_vecs: List[np.ndarray],
-        percentiles: List[int] = [1, 5, 10, 20, 30],
-        neg_mode: str = "deranged",
-        neg_offset: int = 37,
-        seed: int = 1337,
-        claim_vec_cache: Dict[str, np.ndarray] = None,
-    ) -> Dict[str, Any]:
-        # 1. Compute energies on POSITIVE samples (claim + correct evidence)
-        pos_energies = []
-        for claim, ev in zip(claims, evidence_vecs):
-            energy = compute_energy_core(
-                    claim_vec=self.embedder.embed([claim])[0],
-                    evidence_vecs=ev,
-                    top_k=self.gate.energy_computer.top_k,
-                    rank_r=self.gate.energy_computer.rank_r,
-                ).energy
-            pos_energies.append(energy)
-        
-        # 2. Generate NEGATIVE samples via adversarial transformation
+        *,
+        neg_mode: str,
+        neg_offset: int,
+        seed: int,
+        claim_vec_cache: Dict[str, np.ndarray],
+    ) -> List[float]:
         neg_samples = self._generate_negatives(
-            claims, evidence_sets,
+            claims=claims,
+            evidence_sets=evidence_sets,
+            evidence_vecs_list=evidence_vecs,
             mode=neg_mode,
             offset=neg_offset,
             seed=seed,
+            energy_computer=self.gate.energy_computer if neg_mode == "hard_mined_v2" else None,
         )
-        
-        # 3. Compute energies on NEGATIVE samples (claim + mismatched evidence)
-        neg_energies = []
 
-        for claim_text, evidence_texts in neg_samples:
-            if not evidence_texts:
+        energies = []
+        for claim_text, _, ev_vecs_neg in neg_samples:
+            if ev_vecs_neg.size == 0:
                 continue
 
-            # ---- CLAIM VECTOR (cached) ----
             if claim_text in claim_vec_cache:
                 claim_vec = claim_vec_cache[claim_text]
             else:
                 claim_vec = self.embedder.embed([claim_text])[0]
                 claim_vec_cache[claim_text] = claim_vec
 
-            # ---- EVIDENCE VECTORS (CRITICAL) ----
-            # DO NOT re-embed if vectors already exist
-            if isinstance(evidence_texts, np.ndarray):
-                evidence_vecs = evidence_texts
-            else:
-                evidence_vecs = self.embedder.embed(evidence_texts)
-
-            # ---- ENERGY COMPUTATION ----
-            energy = compute_energy_from_vectors(
+            e = compute_energy_from_vectors(
                 claim_vec=claim_vec,
-                evidence_vecs=evidence_vecs,
+                evidence_vecs=ev_vecs_neg,
                 energy_computer=self.gate.energy_computer,
             )
+            energies.append(float(e))
 
-            neg_energies.append(float(energy))
-        
-        if len(neg_energies) < 10:
-            raise ValueError(
-                f"Insufficient negative samples for calibration ({len(neg_energies)}). "
-                "Check evidence quality and negative generation mode."
-            )
-        
-        # 4. Calibrate thresholds DIRECTLY from negative distribution
-        tau_by_percentile = {
-            p: float(np.percentile(neg_energies, p))
-            for p in percentiles
-        }
-        
-        # 5. Compute separation metric (critical for validation)
-        separation_delta = (
-            np.mean(neg_energies) - np.mean(pos_energies)
-            if pos_energies and neg_energies else 0.0
-        )
-        
-        return {
-            "tau_by_percentile": tau_by_percentile,
-            "pos_energies": pos_energies,
-            "neg_energies": neg_energies,
-            "separation_delta": separation_delta,
-            "sample_count": len(pos_energies),
-            "neg_sample_count": len(neg_energies),
-            "neg_mode": neg_mode,
-        }
-    
+        return energies
+
 def compute_energy_from_vectors(
     claim_vec: np.ndarray,
     evidence_vecs: np.ndarray,
@@ -249,3 +351,4 @@ def compute_energy_from_vectors(
         evidence_vecs=evidence_vecs,
     )
     return res.energy
+
