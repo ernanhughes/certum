@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
-from .types import EnergyResult, OracleCalibration, Verdict
+from .types import EnergyResult, Verdict
 import numpy as np
 
 class Policy(ABC):
@@ -9,8 +9,7 @@ class Policy(ABC):
     @abstractmethod
     def decide(
         self,
-        energy_result: EnergyResult,
-        oracle_calibration: Optional[OracleCalibration] = None
+        energy_result: EnergyResult
     ) -> Verdict:
         pass
     
@@ -30,7 +29,7 @@ class FixedThresholdPolicy(Policy):
     def name(self) -> str:
         return f"fixed.tau{self.tau_accept:.2f}"
     
-    def decide(self, energy_result: EnergyResult, oracle_calibration: Optional[OracleCalibration] = None) -> Verdict:
+    def decide(self, energy_result: EnergyResult) -> Verdict:
         if energy_result.energy <= self.tau_accept:
             return Verdict.ACCEPT
         if energy_result.energy <= self.tau_review:
@@ -56,18 +55,18 @@ class AdaptivePercentilePolicy(Policy):
     
     def decide(
         self,
-        energy_result: EnergyResult,
-        oracle_calibration: Optional[OracleCalibration] = None
+        energy_result: EnergyResult
     ) -> Verdict:
-        # Use energy_gap if oracle calibration available
-        energy = oracle_calibration.energy_gap if oracle_calibration else energy_result.energy
+        # Primary gate: energy threshold (negative-calibrated)
+        if energy_result.energy > self.tau_accept:
+            return Verdict.REJECT
         
-        if energy <= self.tau_accept:
-            return Verdict.ACCEPT
-        if energy <= self.tau_review:
-            return Verdict.REVIEW
-        return Verdict.REJECT
-
+        # Secondary gate: structural integrity check
+        # Rank < 2 = artificially low-dimensional subspace (brittle alignment)
+        if energy_result.effective_rank < 2:
+            return Verdict.REVIEW  # Route ambiguity to human judgment
+        
+        return Verdict.ACCEPT
 class PolicyRegistry:
     """Factory for policy instantiation."""
     

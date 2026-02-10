@@ -19,23 +19,11 @@ class EnergyResult:
     effective_rank: int    # actual rank from SVD
     used_count: int        # evidence vectors actually available
     sensitivity: float = 0.0
+    entropy_rank: float = 0.0 
+
 
     def is_stable(self, threshold: float = 1e-4) -> bool:
         return self.identity_error < threshold
-
-@dataclass(frozen=True)
-class OracleCalibration:
-    """Oracle-relative energy calibration."""
-    oracle_energy: float   # Should be near 0.0 for valid oracle
-    energy_gap: float      # claim_energy - oracle_energy
-    is_valid: bool         # oracle_energy < threshold (e.g., 0.01)
-    
-    @property
-    def gap_ratio(self) -> float:
-        """Relative drift from oracle baseline."""
-        if self.oracle_energy < 1e-7:
-            return self.energy_gap  # Avoid division by near-zero
-        return self.energy_gap / max(self.oracle_energy, 1e-7)
 
 @dataclass(frozen=True)
 class EvaluationResult:
@@ -43,7 +31,6 @@ class EvaluationResult:
     claim: str
     evidence: List[str]
     energy_result: EnergyResult
-    oracle_calibration: Optional[OracleCalibration]
     verdict: Verdict
     policy_applied: str
     robustness_probe: Optional[List[float]] = None  # Energy under param variations
@@ -52,8 +39,6 @@ class EvaluationResult:
         return {
             "claim": self.claim[:120] + "..." if len(self.claim) > 120 else self.claim,
             "energy": self.energy_result.energy,
-            "oracle_energy": self.oracle_calibration.oracle_energy if self.oracle_calibration else None,
-            "energy_gap": self.oracle_calibration.energy_gap if self.oracle_calibration else None,
             "verdict": self.verdict.value,
             "policy": self.policy_applied,
             "is_stable": self.energy_result.is_stable(),

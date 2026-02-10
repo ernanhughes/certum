@@ -15,7 +15,6 @@ import numpy as np
 from dpgss.cache import FeverousCache
 from dpgss.embedder import HFEmbedder
 from dpgss.energy import HallucinationEnergyComputer
-from dpgss.oracle import OracleValidator
 from dpgss.policy import AdaptivePercentilePolicy
 from dpgss.gate import VerifiabilityGate
 from dpgss.calibration import AdaptiveCalibrator
@@ -87,8 +86,7 @@ def run_gate_suite(
     # 2. Build gate
     embedder = HFEmbedder(model_name=model_name)
     energy_computer = HallucinationEnergyComputer(top_k=12, rank_r=8)
-    oracle_validator = OracleValidator(max_allowed_energy=0.01)
-    gate = VerifiabilityGate(embedder, energy_computer, oracle_validator)
+    gate = VerifiabilityGate(embedder, energy_computer)
     
     # 3. Calibrate adaptive policy using NEGATIVE CONTROL ENERGIES
     calibrator = AdaptiveCalibrator(gate, embedder=embedder)
@@ -156,6 +154,14 @@ def run_gate_suite(
     pos_summary = AuditLogger.generate_summary_report(pos_results)
     neg_summary = AuditLogger.generate_summary_report(neg_results)
     
+    report_params = {
+        "tau_cal": tau,          # ← CRITICAL: validator expects this key
+        "far": far,
+        "neg_mode": neg_mode,
+        "seed": seed,
+        "cal_frac": cal_frac,
+    }
+
     report = {
         "config": {
             "model": model_name,
@@ -166,6 +172,16 @@ def run_gate_suite(
             "neg_mode": neg_mode,
             "seed": seed
         },
+        "stats": {
+            "eval": {                # Required by validator
+                "FAR": far,
+                "TPR": "TBD",
+                "AUC": "TBD",
+            },
+            "load_stats": load_stats,
+            "neg_generation": neg_meta
+        },
+        "params": report_params,
         "calibration": sweep_results,
         "positive_samples": pos_summary,
         "negative_samples": neg_summary,

@@ -19,8 +19,6 @@ class AuditLogger:
         """Statistical summary for paper/report."""
         verdicts = [r.verdict for r in results]
         energies = [r.energy_result.energy for r in results]
-        gaps = [r.oracle_calibration.energy_gap for r in results 
-                if r.oracle_calibration and r.oracle_calibration.is_valid]
         
         return {
             "total_samples": len(results),
@@ -34,11 +32,6 @@ class AuditLogger:
                 "std": float(np.std(energies)),
                 "p50": float(np.percentile(energies, 50)),
                 "p90": float(np.percentile(energies, 90))
-            },
-            "oracle_stats": {
-                "valid_count": len(gaps),
-                "gap_mean": float(np.mean(gaps)) if gaps else None,
-                "gap_std": float(np.std(gaps)) if gaps else None
             },
             "stability": {
                 "stable_count": sum(1 for r in results if r.energy_result.is_stable()),

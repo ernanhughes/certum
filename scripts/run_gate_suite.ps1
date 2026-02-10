@@ -54,4 +54,3 @@ py scripts\validate_gate_artifacts.py `
 
 Write-Host ""
 Write-Host "DONE. Run folder: $OUTDIR"
-Write-Host "⚠️  Check oracle validity rates in reports — if >95% near-zero, your gate is trivial!"
