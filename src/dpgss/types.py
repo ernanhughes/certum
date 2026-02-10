@@ -18,7 +18,8 @@ class EnergyResult:
     rank_r: int            # subspace rank used
     effective_rank: int    # actual rank from SVD
     used_count: int        # evidence vectors actually available
-    
+    sensitivity: float = 0.0
+
     def is_stable(self, threshold: float = 1e-4) -> bool:
         return self.identity_error < threshold
 

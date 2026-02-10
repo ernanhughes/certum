@@ -28,11 +28,14 @@ from dpgss.dataset import load_examples
 from dpgss.plot import plot_distributions
 
 def get_adversarial_generator(mode: str, **kwargs) -> AdversarialPairGenerator:
+    off = kwargs.get("neg_offset", 37)
+    off = 37 if off is None else int(off) # Ensure offset is an integer for generators that require it
+
     """Factory for negative calibration modes."""
     if mode == "deranged":
         return DerangedPairGenerator()
     elif mode == "offset":
-        return OffsetPairGenerator(offset=int(kwargs.get("neg_offset", 37)))
+        return OffsetPairGenerator(offset=off)
     elif mode == "cyclic":
         return CyclicPairGenerator()
     elif mode == "permute":
@@ -90,7 +93,6 @@ def run_gate_suite(
     # 3. Calibrate adaptive policy using NEGATIVE CONTROL ENERGIES
     calibrator = AdaptiveCalibrator(gate, embedder=embedder)
     
-    # ✅ FIXED: Extract claims/evidence from dicts (not tuple unpacking)
     cal_claims = [sample["claim"] for sample in cal_samples]
     cal_evidence = [sample["evidence"] for sample in cal_samples]
     cal_evidence_vecs = [sample["evidence_vecs"] for sample in cal_samples]
@@ -120,7 +122,7 @@ def run_gate_suite(
 
     # 5. Evaluate POSITIVE samples
     pos_results = []
-    for sample in eval_samples:  # ✅ FIXED: iterate over dicts
+    for sample in eval_samples: 
         claim = sample["claim"]
         evidence = sample["evidence"]
         try:
@@ -137,7 +139,6 @@ def run_gate_suite(
         pairs=eval_samples,
         seed=seed,
         embedder=embedder,   # required for hard_mined
-        offset=neg_offset or 1,
     )
 
     neg_results = []

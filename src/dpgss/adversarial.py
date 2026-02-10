@@ -20,7 +20,6 @@ class AdversarialPairGenerator(ABC):
         *,
         seed: int,
         embedder: Optional[Any] = None,
-        offset: int = 1,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         pass
 
@@ -99,9 +98,13 @@ class DerangedPairGenerator(AdversarialPairGenerator):
         *,
         seed: int,
         embedder: Optional[Any] = None,
-        offset: int = 1,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         n = len(pairs)
+        if n <= 1:
+            # cannot derange, fallback to cyclic/offset/no-op
+            negs = [_neg_from(pairs, 0, 0)] if n == 1 else []
+            meta = {"mode": "deranged", "n": n, "fixed_points": n, "note": "degenerate"}
+            return negs, meta
         rng = random.Random(seed)
         perm, meta = derangement_indices(n, rng)
 
@@ -117,15 +120,14 @@ class CyclicPairGenerator(AdversarialPairGenerator):
     def name(self) -> str:
         return "cyclic"
 
-    def generate(
-        self,
-        pairs: List[Dict[str, Any]],
-        *,
-        seed: int,
-        embedder: Optional[Any] = None,
-        offset: int = 1,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def generate(self, pairs, *, seed: int, embedder=None):
         n = len(pairs)
+        if n == 0:
+            return [], {"mode": "cyclic", "n": 0, "fixed_points": 0, "note": "empty"}
+        if n == 1:
+            negs = [_neg_from(pairs, 0, 0)]
+            return negs, {"mode": "cyclic", "n": 1, "fixed_points": 1, "note": "degenerate"}
+
         perm = [(i + 1) % n for i in range(n)]
         negs = [_neg_from(pairs, i, perm[i]) for i in range(n)]
         return negs, {"mode": "cyclic", "n": n, "fixed_points": 0}
@@ -139,20 +141,30 @@ class OffsetPairGenerator(AdversarialPairGenerator):
     def name(self) -> str:
         return f"offset_{self.offset}"
 
-    def generate(
-        self,
-        pairs: List[Dict[str, Any]],
-        *,
-        seed: int,
-        embedder: Optional[Any] = None,
-        offset: Optional[int] = None,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def generate(self, pairs, *, seed: int, embedder=None):
         n = len(pairs)
-        off = (offset if offset is not None else self.offset) % n
+        if n == 0:
+            return [], {"mode": "offset", "n": 0, "requested_offset": self.offset, "effective_offset": 0, "fixed_points": 0, "note": "empty"}
+
+        off = self.offset % n
+        adjusted = False
+        if n > 1 and off == 0:
+            off = 1
+            adjusted = True
+
         perm = [(i + off) % n for i in range(n)]
         fixed = sum(1 for i in range(n) if perm[i] == i)
         negs = [_neg_from(pairs, i, perm[i]) for i in range(n)]
-        return negs, {"mode": "offset", "n": n, "offset": off, "fixed_points": fixed}
+        meta = {
+            "mode": "offset",
+            "n": n,
+            "requested_offset": self.offset,
+            "effective_offset": off,
+            "fixed_points": fixed,
+        }
+        if adjusted:
+            meta["note"] = "offset% n == 0 adjusted to 1"
+        return negs, meta
 
 
 class PermutePairGenerator(AdversarialPairGenerator):
@@ -166,7 +178,6 @@ class PermutePairGenerator(AdversarialPairGenerator):
         *,
         seed: int,
         embedder: Optional[Any] = None,
-        offset: int = 1,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         n = len(pairs)
         rng = random.Random(seed)
@@ -188,7 +199,6 @@ class HardMinedPairGenerator(AdversarialPairGenerator):
         *,
         seed: int,
         embedder: Optional[Any] = None,
-        offset: int = 1,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         if embedder is None:
             raise ValueError("hard_mined requires embedder")
