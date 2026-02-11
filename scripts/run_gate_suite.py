@@ -19,7 +19,7 @@ from dpgss.embedding.sqlite_embedding_backend import SQLiteEmbeddingBackend
 from dpgss.evidence.sqlite_evidence_store import SQLiteEvidenceStore
 from dpgss.embedding.embedder import HFEmbedder
 from dpgss.energy import HallucinationEnergyComputer
-from dpgss.policy.difficulty_v2 import DifficultyV2, DifficultyV2Ranges
+from dpgss.policy.difficulty import Difficulty, DifficultyRanges
 from dpgss.policy.policy import AdaptivePercentilePolicy
 from dpgss.policy.difficulty import DEFAULT_THRESHOLDS, DEFAULT_WEIGHTS
 from dpgss.gate import VerifiabilityGate
@@ -117,11 +117,11 @@ def run_gate_suite(
             "thresholds": DEFAULT_THRESHOLDS,
         }
     }
-    ranges = DifficultyV2Ranges(
-        margin_min=0.0,
-        margin_max=0.25
+    ranges = DifficultyRanges(
+        margin_p90=0.0,
+        rank_ratio_p90=0.25
     )
-    difficulty = DifficultyV2(ranges=ranges)  # Use defaults for now; can be extended to load from config
+    difficulty = Difficulty(ranges=ranges)  # Use defaults for now; can be extended to load from config
     gate = VerifiabilityGate(embedder, energy_computer, difficulty)
     
     # 3. Calibrate adaptive policy using NEGATIVE CONTROL ENERGIES

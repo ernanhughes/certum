@@ -22,19 +22,26 @@ class AdaptiveCalibrator:
         claims: List[str],
         evidence_sets: List[List[str]],
         evidence_vecs: List[np.ndarray],
+        claim_vec_cache: Dict[str, np.ndarray],
         percentiles: List[int] = [1, 5, 10, 20, 30],
         neg_mode: str = "deranged",
         neg_offset: int = 37,
         seed: int = 1337,
-        claim_vec_cache: Dict[str, np.ndarray] = None,
     ) -> Dict[str, Any]:
         # 1. Compute energies on POSITIVE samples
         pos_energies = []
         for claim, ev in zip(claims, evidence_vecs):
+            if claim in claim_vec_cache:
+                claim_vec = claim_vec_cache[claim]
+            else:
+                claim_vec = self.embedder.embed([claim])[0]
+                claim_vec_cache[claim] = claim_vec
+
             energy = self.gate.energy_computer.compute(
-                claim_vec=self.embedder.embed([claim])[0],
+                claim_vec=claim_vec,
                 evidence_vecs=ev,
             ).energy
+
             pos_energies.append(energy)
         
         # 2. Compute NEGATIVE energies (easy baseline: deranged)
@@ -64,18 +71,29 @@ class AdaptiveCalibrator:
                 "Insufficient negative samples for hard-negative gap calibration."
             )
         
-        hard_negative_gap = float(
-            np.mean(neg_energies_hard) - np.mean(neg_energies_deranged)
+        hard_negative_gap = self._compute_hard_negative_gap(
+            neg_energies_deranged,
+            neg_energies_hard,
         )
-        hard_negative_gap_norm = hard_negative_gap / max(
-            1e-6, np.std(neg_energies_deranged)
-        )
+        std_ref = float(np.std(neg_energies_deranged))
+        if std_ref < 1e-6:
+            hard_negative_gap_norm = 0.0
+        else:
+            hard_negative_gap_norm = hard_negative_gap / std_ref
+
 
         
         # 4-5. Calibrate thresholds + compute separation (unchanged)
         tau_by_percentile = {p: float(np.percentile(neg_energies_hard, p)) for p in percentiles}
         separation_delta = np.mean(neg_energies_hard) - np.mean(pos_energies) if pos_energies and neg_energies_hard else 0.0
-        
+
+        print(
+            f"[Calibration] mean_deranged={np.mean(neg_energies_deranged):.4f} "
+            f"mean_hard={np.mean(neg_energies_hard):.4f} "
+            f"gap={hard_negative_gap:.4f} "
+            f"gap_norm={hard_negative_gap_norm:.4f}"
+        )
+
         return {
             "tau_by_percentile": tau_by_percentile,
             "pos_energies": pos_energies,
@@ -340,6 +358,19 @@ class AdaptiveCalibrator:
             energies.append(float(e))
 
         return energies
+
+    def _compute_hard_negative_gap(
+        self,
+        deranged_energies: List[float],
+        hard_energies: List[float],
+    ) -> float:
+        if len(deranged_energies) == 0 or len(hard_energies) == 0:
+            return 0.0
+        
+        mean_deranged = float(np.mean(deranged_energies))
+        mean_hard = float(np.mean(hard_energies))
+        
+        return mean_hard - mean_deranged
 
 def compute_energy_from_vectors(
     claim_vec: np.ndarray,

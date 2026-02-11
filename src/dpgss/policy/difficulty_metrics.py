@@ -2,8 +2,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DifficultyMetrics:
-    evidence_count: int
-    effective_rank: int
+    sim_margin: float
     sensitivity: float
-    robustness_variance: float
-    hard_negative_gap: float
+    evidence_count: int  
+    effective_rank: int  

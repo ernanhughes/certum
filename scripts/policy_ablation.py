@@ -1,6 +1,5 @@
 import json
 from dataclasses import dataclass
-from operator import neg
 from pathlib import Path
 from typing import List, Dict
 import numpy as np
@@ -8,11 +7,112 @@ import matplotlib.pyplot as plt
 
 
 # -----------------------------
-# Data loading
+# Pure Ambiguity Calibration (Policy-Agnostic Difficulty)
 # -----------------------------
 
 @dataclass(frozen=True)
+class DifficultyV2Ranges:
+    """Calibrated from POSITIVE examples ONLY (clear evidence regime)"""
+    margin_p90: float      # 90th percentile sim_margin from deranged positives
+    rank_ratio_p90: float  # 90th percentile (effective_rank / evidence_count)
 
+def calibrate_difficulty_ranges_from_positives(pos_results: List[Dict]) -> DifficultyV2Ranges:
+    """
+    Calibrate ambiguity baseline using POSITIVE examples ONLY.
+    Establishes "easy" regime boundary (90th percentile).
+    """
+    margins = []
+    rank_ratios = []
+    
+    for r in pos_results:
+        if r["meta"]["split"] != "pos":
+            continue
+        e = r["energy"]
+        margins.append(e["similarity"]["sim_margin"])
+        rank_ratios.append(
+            e["support"]["effective_rank"] / max(1, len(r["evidence"]))
+        )
+    
+    if not margins:
+        raise ValueError("No positive examples found for difficulty calibration")
+    
+    # 90th percentile defines "typical easy case" boundary
+    margin_p90 = float(sorted(margins)[int(0.9 * len(margins))])
+    rank_ratio_p90 = float(sorted(rank_ratios)[int(0.9 * len(rank_ratios))])
+    
+    return DifficultyV2Ranges(
+        margin_p90=max(0.05, margin_p90),   # Safety floor
+        rank_ratio_p90=max(0.1, rank_ratio_p90)
+    )
+
+def recompute_difficulty_pure(
+    sim_margin: float,
+    effective_rank: int,
+    evidence_count: int,
+    sensitivity: float,
+    ranges: DifficultyV2Ranges,
+) -> float:
+    """
+    Pure ambiguity index: policy-agnostic evidence uncertainty.
+    Matches DifficultyV2.compute() logic but standalone.
+    """
+    # 1. Similarity Ambiguity (PRIMARY)
+    margin_norm = min(1.0, sim_margin / max(1e-4, ranges.margin_p90))
+    margin_score = 1.0 - margin_norm  # 0=clear winner, 1=ambiguous tie
+
+    # 2. Support Diffuseness
+    rank_ratio = min(1.0, effective_rank / max(1, evidence_count))
+    rank_norm = min(1.0, rank_ratio / max(1e-4, ranges.rank_ratio_p90))
+    rank_score = rank_norm  # 0=sharp focus, 1=diffuse support
+
+    # 3. Sensitivity (robustness)
+    sensitivity_score = min(1.0, max(0.0, sensitivity))
+
+    # Weighted blend (tuned for ambiguity separation)
+    difficulty = (
+        0.60 * margin_score +    # Dominant: evidence ambiguity
+        0.30 * rank_score +      # Secondary: support diffuseness
+        0.10 * sensitivity_score # Tertiary: perturbation sensitivity
+    )
+    return float(max(0.0, min(1.0, difficulty)))
+
+def patch_results_with_pure_difficulty(
+    results: List[Dict],
+    ranges: DifficultyV2Ranges,
+) -> List[Dict]:
+    """
+    Recompute difficulty using pure ambiguity index.
+    Operates on existing JSONL results — NO gate re-evaluation needed.
+    """
+    patched = []
+    for r in results:
+        # Extract raw metrics already stored in your schema
+        e = r["energy"]
+        sim_margin = e["similarity"]["sim_margin"]
+        effective_rank = e["support"]["effective_rank"]
+        evidence_count = len(r["evidence"])
+        sensitivity = e["robustness"]["sensitivity"]
+        
+        # Recompute policy-agnostic difficulty
+        new_diff = recompute_difficulty_pure(
+            sim_margin, effective_rank, evidence_count, sensitivity, ranges
+        )
+        
+        # Patch result dict (shallow copy)
+        patched_r = r.copy()
+        patched_r["difficulty"] = {
+            "value": new_diff,
+            "bucket": "easy" if new_diff <= 0.40 else ("medium" if new_diff <= 0.75 else "hard")
+        }
+        patched.append(patched_r)
+    return patched
+
+
+# -----------------------------
+# Data loading (unchanged)
+# -----------------------------
+
+@dataclass(frozen=True)
 class Point:
     energy: float
     difficulty: float
@@ -42,7 +142,7 @@ def load_points(jsonl_path: Path) -> List[Point]:
 
 
 # -----------------------------
-# Policy model (recomputed)
+# Policy model (unchanged)
 # -----------------------------
 
 @dataclass(frozen=True)
@@ -112,7 +212,7 @@ def decide_energy_plus_difficulty(energy: float, difficulty: float, tau: float, 
 
 
 # -----------------------------
-# Calibration at fixed FAR
+# Calibration at fixed FAR (unchanged)
 # -----------------------------
 
 def find_tau_for_far_budget(neg: List[Point], target_far: float) -> float:
@@ -176,7 +276,7 @@ def metrics_at_tau(
 
 
 # -----------------------------
-# Ablation: "difficulty contribution"
+# Ablation: "difficulty contribution" (unchanged)
 # -----------------------------
 
 def ablation_report(pos: List[Point], neg: List[Point], target_far: float, knobs: PolicyKnobs) -> Dict[str, Dict[str, float]]:
@@ -199,7 +299,7 @@ def ablation_report(pos: List[Point], neg: List[Point], target_far: float, knobs
 
 
 # -----------------------------
-# Region visualization + area coverage
+# Region visualization + area coverage (unchanged)
 # -----------------------------
 
 def region_id(energy: float, difficulty: float, tau: float, knobs: PolicyKnobs, use_difficulty: bool) -> int:
@@ -422,7 +522,7 @@ def plot_shaded_surface(
 
 
 # -----------------------------
-# Main
+# Main (CALIBRATION-AWARE)
 # -----------------------------
 
 if __name__ == "__main__":
@@ -432,14 +532,53 @@ if __name__ == "__main__":
     run_dir = run_dirs[-1]
     print(f"📊 Using run: {run_dir}")
 
-    # Pick regime
-    pos_path = run_dir / "pos_hard_mined_v2.jsonl"
-    neg_path = run_dir / "neg_hard_mined_v2.jsonl"
-    if not pos_path.exists() or not neg_path.exists():
-        raise RuntimeError(f"Missing expected files: {pos_path.name}, {neg_path.name}")
+    # ---- STEP 1: Load POSITIVE examples for calibration ----
+    pos_der_raw = load_results(run_dir / "pos_deranged.jsonl")
+    if not pos_der_raw:
+        raise RuntimeError("No positive examples found for difficulty calibration")
+    
+    # Calibrate ambiguity baseline from POSITIVES ONLY
+    ranges = calibrate_difficulty_ranges_from_positives(pos_der_raw)
+    print(f"✅ Calibrated DifficultyV2Ranges:")
+    print(f"   margin_p90={ranges.margin_p90:.3f} | rank_ratio_p90={ranges.rank_ratio_p90:.3f}")
 
-    pos = load_points(pos_path)
-    neg = load_points(neg_path)
+    # ---- STEP 2: Patch ALL result sets with pure ambiguity index ----
+    pos_der = patch_results_with_pure_difficulty(pos_der_raw, ranges)
+    neg_der = patch_results_with_pure_difficulty(
+        load_results(run_dir / "neg_deranged.jsonl"), ranges
+    )
+    pos_hard = patch_results_with_pure_difficulty(
+        load_results(run_dir / "pos_hard_mined_v2.jsonl"), ranges
+    )
+    neg_hard = patch_results_with_pure_difficulty(
+        load_results(run_dir / "neg_hard_mined_v2.jsonl"), ranges
+    )
+
+    print(f"POS deranged count: {len(pos_der)}")
+    print(f"NEG deranged count: {len(neg_der)}")
+    print(f"POS hard-mined count: {len(pos_hard)}")
+    print(f"NEG hard-mined count: {len(neg_hard)}")
+
+    # ---- STEP 3: Convert to Point objects (using PATCHED difficulty) ----
+    def to_points(results: List[Dict]) -> List[Point]:
+        pts = []
+        for r in results:
+            e = float(r["energy"]["value"])
+            d = float(r["difficulty"]["value"])
+            e = min(1.0, max(0.0, e))
+            d = min(1.0, max(0.0, d))
+            pts.append(Point(e, d))
+        return pts
+
+    pos_der_pts = to_points(pos_der)
+    neg_der_pts = to_points(neg_der)
+    pos_hard_pts = to_points(pos_hard)
+    neg_hard_pts = to_points(neg_hard)
+
+    # ---- STEP 4: Proceed with EXISTING analysis (now on calibrated difficulty) ----
+    # Pick regime for initial ablation
+    pos = pos_hard_pts
+    neg = neg_hard_pts
     nneg = len(neg)
     step = 1 / max(1, nneg)
     target_far = 0.01
@@ -448,8 +587,6 @@ if __name__ == "__main__":
 
     energies = np.sort([p.energy for p in neg])
     print("min neg energy:", energies[0], "p1:", np.percentile(energies, 1), "p2:", np.percentile(energies, 2))
-
-
 
     knobs = PolicyKnobs(
         difficulty_low=0.40,
@@ -467,16 +604,14 @@ if __name__ == "__main__":
     print("Energy+Difficulty:", rep["energy_plus_difficulty"])
     print(f"NEG n={len(neg)} -> FAR step = {1/len(neg):.4f}")
 
-
     # Use the 2D policy's tau for surfaces and area
     tau = rep["tau"]
 
-
-    print("\n--- NEG ACCEPTED ENERGIES ---")
+    print("\n--- NEG ACCEPTED ENERGIES (patched difficulty) ---")
     for p in neg:
         if decide_energy_plus_difficulty(p.energy, p.difficulty, tau, knobs) == "accept":
-            print(p.energy, p.difficulty)
-    print("\n--- END NEG ACCEPTED ENERGIES ---")
+            print(f"  energy={p.energy:.4f} | difficulty={p.difficulty:.4f}")
+    print("--- END NEG ACCEPTED ENERGIES ---")
 
     areas_E  = region_area_coverage(tau, knobs, use_difficulty=False)
     areas_ED = region_area_coverage(tau, knobs, use_difficulty=True)
@@ -488,67 +623,22 @@ if __name__ == "__main__":
     plot_shaded_surface(
         pos, tau, knobs,
         use_difficulty=True,
-        title="POS: shaded policy regions (E+D)",
-        out_path=run_dir / "policy_surface_pos.png"
+        title="POS: shaded policy regions (E+D, patched)",
+        out_path=run_dir / "policy_surface_pos_patched.png"
     )
 
     plot_shaded_surface(
         neg, tau, knobs,
         use_difficulty=True,
-        title="NEG: shaded policy regions (E+D)",
-        out_path=run_dir / "policy_surface_neg.png"
+        title="NEG: shaded policy regions (E+D, patched)",
+        out_path=run_dir / "policy_surface_neg_patched.png"
     )
 
-    # Load scored JSONLs
-    pos_der = load_results(run_dir /"pos_deranged.jsonl")
-    neg_der = load_results(run_dir /"neg_deranged.jsonl")
-    print("POS count:", len(pos_der))
-    print("NEG count:", len(neg_der))
-
-    pos_hard = load_results(run_dir /"pos_hard_mined_v2.jsonl")
-    neg_hard = load_results(run_dir /"neg_hard_mined_v2.jsonl")
-
-    print("POS count:", len(pos_hard))
-    print("NEG count:", len(neg_hard))
-    
-    corr_energy_difficulty(pos_der,  "POS deranged")
-    corr_energy_difficulty(neg_der,  "NEG deranged")
-    corr_energy_difficulty(pos_hard, "POS hard_mined_v2")
-    corr_energy_difficulty(neg_hard, "NEG hard_mined_v2")
-
-    # Convert to Point objects for tau calibration
-    neg_der_pts = [
-        Point(
-            energy=r["energy"]["value"],
-            difficulty=r["difficulty"]["value"]
-        )
-        for r in neg_der
-    ]
-
-    neg_hard_pts = [
-        Point(
-            energy=r["energy"]["value"],
-            difficulty=r["difficulty"]["value"]
-        )
-        for r in neg_hard
-    ]
-
-    pos_der_pts = [
-        Point(
-            energy=r["energy"]["value"],
-            difficulty=r["difficulty"]["value"]
-        )
-        for r in pos_der
-    ]
-
-    pos_hard_pts = [
-        Point(
-            energy=r["energy"]["value"],
-            difficulty=r["difficulty"]["value"]
-        )
-        for r in pos_hard
-    ]
-
+    # Correlation diagnostics (now on patched difficulty)
+    corr_energy_difficulty(pos_der,  "POS deranged (patched)")
+    corr_energy_difficulty(neg_der,  "NEG deranged (patched)")
+    corr_energy_difficulty(pos_hard, "POS hard_mined_v2 (patched)")
+    corr_energy_difficulty(neg_hard, "NEG hard_mined_v2 (patched)")
 
     # ---- Compute per-distribution taus ----
     tau_der = find_tau_for_far_budget(neg_der_pts, target_far)
@@ -592,25 +682,18 @@ if __name__ == "__main__":
     print("TPR (hard_mined_v2, own tau):", tpr_hard_own)
     print("ΔTPR (own tau):", tpr_der_own - tpr_hard_own)
 
-    print("\n=== Calibrated Taus (FAR=%.3f) ===" % target_far)
-    print("tau_deranged:", tau_der)
-    print("tau_hard_mined_v2:", tau_hard)
-
-    print("\n=== TPR using SHARED tau (hard_mined_v2 calibrated) ===")
-    print("TPR (deranged, shared tau):", tpr_der_shared)
-    print("TPR (hard_mined_v2, shared tau):", tpr_hard_shared)
-    print("ΔTPR (shared tau):", tpr_der_shared - tpr_hard_shared)
-
-    print("\n=== TPR using OWN tau per distribution ===")
-    print("TPR (deranged, own tau):", tpr_der_own)
-    print("TPR (hard_mined_v2, own tau):", tpr_hard_own)
-    print("ΔTPR (own tau):", tpr_der_own - tpr_hard_own)
-
+    print("\n=== Rank Statistics (patched) ===")
     print("Deranged POS rank:", extract_rank_stats(pos_der))
     print("Hard POS rank:", extract_rank_stats(pos_hard))
 
+    print("\n=== Difficulty Statistics (patched) ===")
     print("POS difficulty:", difficulty_stats(pos_der))
     print("NEG difficulty:", difficulty_stats(neg_der))
+
+    # Diagnostic: Print patched difficulty separation
+    pos_diff_mean = difficulty_stats(pos_der)["mean"]
+    neg_diff_mean = difficulty_stats(neg_der)["mean"]
+    print(f"\n✅ Difficulty separation (patched): POS={pos_diff_mean:.3f} vs NEG={neg_diff_mean:.3f} | Δ={abs(pos_diff_mean - neg_diff_mean):.3f}")
 
     fars = np.linspace(0.005, 0.05, 20)
 
@@ -623,7 +706,8 @@ if __name__ == "__main__":
     plt.xlabel("FAR")
     plt.ylabel("Calibrated tau")
     plt.legend()
-    plt.savefig(run_dir / "tau_vs_far.png")
+    plt.title("Tau vs FAR (patched difficulty)")
+    plt.savefig(run_dir / "tau_vs_far_patched.png")
     plt.close()
 
     tpr_der_curve = sweep_tpr_vs_far(pos_der_pts, neg_der_pts, fars, knobs)
@@ -635,62 +719,64 @@ if __name__ == "__main__":
     plt.xlabel("FAR")
     plt.ylabel("TPR")
     plt.legend()
-    plt.savefig(run_dir / "tpr_vs_far.png")
+    plt.title("TPR vs FAR (patched difficulty)")
+    plt.savefig(run_dir / "tpr_vs_far_patched.png")
     plt.close()
 
     # Rank vs Energy plots
     plot_rank_vs_energy(
         pos_der,
-        run_dir / "rank_vs_energy_pos_deranged.png",
-        "POS Deranged: rank vs energy"
+        run_dir / "rank_vs_energy_pos_deranged_patched.png",
+        "POS Deranged: rank vs energy (patched)"
     )
 
     plot_rank_vs_energy(
         pos_hard,
-        run_dir / "rank_vs_energy_pos_hard_mined_v2.png",
-        "POS Hard-Mined: rank vs energy"
+        run_dir / "rank_vs_energy_pos_hard_mined_v2_patched.png",
+        "POS Hard-Mined: rank vs energy (patched)"
     )
 
     plot_rank_vs_energy(
         neg_der,
-        run_dir / "rank_vs_energy_neg_deranged.png",
-        "NEG Deranged: rank vs energy"
+        run_dir / "rank_vs_energy_neg_deranged_patched.png",
+        "NEG Deranged: rank vs energy (patched)"
     )
 
     plot_rank_vs_energy(
         neg_hard,
-        run_dir / "rank_vs_energy_neg_hard_mined_v2.png",
-        "NEG Hard-Mined: rank vs energy"
+        run_dir / "rank_vs_energy_neg_hard_mined_v2_patched.png",
+        "NEG Hard-Mined: rank vs energy (patched)"
     )
 
     plot_similarity_diagnostics(
         pos_der,
-        run_dir / "pos_deranged",
-        "POS Deranged"
+        run_dir / "pos_deranged_patched",
+        "POS Deranged (patched)"
     )
 
     plot_similarity_diagnostics(
         pos_hard,
-        run_dir / "pos_hard_mined_v2",
-        "POS Hard-Mined"
+        run_dir / "pos_hard_mined_v2_patched",
+        "POS Hard-Mined (patched)"
     )
 
     plot_similarity_diagnostics(
         neg_der,
-        run_dir / "neg_deranged",
-        "NEG Deranged"
+        run_dir / "neg_deranged_patched",
+        "NEG Deranged (patched)"
     )
 
     plot_similarity_diagnostics(
         neg_hard,
-        run_dir / "neg_hard_mined_v2",
-        "NEG Hard-Mined"
+        run_dir / "neg_hard_mined_v2_patched",
+        "NEG Hard-Mined (patched)"
     )
 
-
-    print("Correlation rank↔energy (deranged POS):",
+    print("\nCorrelation rank↔energy (deranged POS, patched):",
         np.corrcoef(
             [r["energy"]["support"]["effective_rank"] for r in pos_der],
             [r["energy"]["value"] for r in pos_der]
         )[0,1])
 
+    print("\n✅ Pure ambiguity calibration complete.")
+    print("   Next: Check correlation diagnostics for orthogonality (target: |Corr(E,D)| > 0.20 on hard-mined negatives)")
