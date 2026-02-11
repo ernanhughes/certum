@@ -59,7 +59,7 @@ class HFEmbedder:
     def embed(self, texts: List[str]) -> np.ndarray:
         if not texts:
             return np.zeros((0, self.dimension()), dtype=np.float32)
-        print(f"Embedding {len(texts)} texts with model '{self.model_name}'...")
+        # print(f"Embedding {len(texts)} texts with model '{self.model_name}'...")
 
         key = tuple(texts)
         if key in self._memory_cache:

@@ -46,7 +46,7 @@ class HallucinationEnergyComputer:
         if evidence_vecs.size == 0:
             return EnergyResult(
                 energy=1.0, explained=0.0, identity_error=1.0,
-                topk=0, rank_r=0, effective_rank=0, used_count=0
+                evidence_topk=0, rank_cap=0, effective_rank=0, used_count=0
             )
         
         c = _unit_norm(claim_vec)
@@ -77,8 +77,8 @@ class HallucinationEnergyComputer:
             energy=max(0.0, min(1.0, energy)),
             explained=max(0.0, min(1.0, explained)),
             identity_error=identity_error,
-            topk=min(self.top_k, E.shape[0]),
-            rank_r=self.rank_r,
+            evidence_topk=min(self.top_k, E.shape[0]),
+            rank_cap=self.rank_r,
             sensitivity=sensitivity,
             entropy_rank=float(effective_rank) / max(1, E.shape[0]),
             effective_rank=effective_rank,

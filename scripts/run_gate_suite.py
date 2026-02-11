@@ -9,6 +9,7 @@ import random
 from pathlib import Path
 from typing import Optional
 from time import time
+from tqdm import tqdm
 
 import numpy as np
 import uuid
@@ -69,6 +70,8 @@ def run_gate_suite(
     neg_offset: Optional[int] = None,
     plot_png: Optional[Path] = None,
 ):
+    start_time = time()
+
     run_id = str(uuid.uuid4())
 
     # Determinism
@@ -93,6 +96,13 @@ def run_gate_suite(
     cal_samples = samples[:cal_n]
     eval_samples = samples[cal_n:]
     
+    print("\n==============================")
+    print("📦 PHASE 1 — Data Loaded")
+    print(f"Total samples: {len(samples)}")
+    print(f"Calibration: {len(cal_samples)}")
+    print(f"Evaluation: {len(eval_samples)}")
+    print("==============================\n")
+
     # 2. Build gate
     backend = SQLiteEmbeddingBackend(str(embedding_db))
     embedder = HFEmbedder(model_name=model_name, backend=backend)
@@ -110,6 +120,9 @@ def run_gate_suite(
     gate = VerifiabilityGate(embedder, energy_computer, difficulty)
     
     # 3. Calibrate adaptive policy using NEGATIVE CONTROL ENERGIES
+    print("\n⚙️ PHASE 3 — Calibration\n")
+    cal_start = time()
+
     calibrator = AdaptiveCalibrator(gate, embedder=embedder)
     
     cal_claims = [sample["claim"] for sample in cal_samples]
@@ -126,6 +139,8 @@ def run_gate_suite(
         seed=seed,
         claim_vec_cache=claim_vec_cache,
     )
+    print(f"Calibration completed in {time() - cal_start:.2f} seconds\n")
+
 
     # 4. Get policy calibrated on NEGATIVE energies
     tau = sweep_results["tau_by_percentile"][int(far * 100)]
@@ -142,7 +157,8 @@ def run_gate_suite(
 
     # 5. Evaluate POSITIVE samples
     pos_results = []
-    for sample in eval_samples: 
+    print("\n🚦 PHASE 5 — Evaluating POS samples\n")
+    for sample in tqdm(eval_samples, desc="POS evaluation", unit="sample"):
         claim = sample["claim"]
         evidence = sample["evidence"]
         try:
@@ -153,6 +169,7 @@ def run_gate_suite(
             continue
     
     # 6. Generate NEGATIVE samples via adversarial PAIR transformation
+    print("\n🔥 PHASE 6 — Generating adversarial negatives\n")
     adv_gen = get_adversarial_generator(neg_mode, neg_offset=neg_offset)
 
     neg_pairs, neg_meta = adv_gen.generate(
@@ -165,7 +182,9 @@ def run_gate_suite(
     print(json.dumps(neg_meta, indent=2))
     
     neg_results = []
-    for pair in neg_pairs:
+    print("\n🚦 PHASE 7 — Evaluating NEG samples\n")
+    for pair in tqdm(neg_pairs, desc="NEG evaluation", unit="sample"):
+
         try:
             result = gate.evaluate(pair["claim"], pair["evidence"], policy, run_id=run_id)
             neg_results.append(result)
@@ -245,6 +264,11 @@ def run_gate_suite(
             out_path=plot_png,
             tau=tau  # Pass calibrated tau for visualization
         )    
+    
+    print("\n==============================")
+    print(f"✅ Run completed in {time() - start_time:.2f} seconds")
+    print("==============================")
+
 
 def ensure_vectors(samples, embedder):
     for s in samples:
