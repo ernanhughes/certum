@@ -4,7 +4,7 @@ import random
 import numpy as np
 
 from dpgss.energy import HallucinationEnergyComputer
-from .embedder import Embedder
+from .embedding.embedder import Embedder
 from .gate import VerifiabilityGate
 
 class AdaptiveCalibrator:

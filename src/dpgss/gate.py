@@ -6,7 +6,7 @@ from dpgss.policy.difficulty import DifficultyIndex
 from dpgss.policy.difficulty_metrics import DifficultyMetrics
 
 from dpgss.custom_types import EnergyResult, EvaluationResult
-from dpgss.embedder import Embedder
+from dpgss.embedding.embedder import Embedder
 from dpgss.energy import HallucinationEnergyComputer
 from dpgss.policy.policy import Policy
 import numpy as np

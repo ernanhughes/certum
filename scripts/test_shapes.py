@@ -1,4 +1,4 @@
-from dpgss.embedder import HFEmbedder
+from dpgss.embedding.embedder import HFEmbedder
 from dpgss.energy import HallucinationEnergyComputer
 import numpy as np
 

@@ -15,7 +15,7 @@ import uuid
 
 # Your new class architecture
 from dpgss.cache import FeverousCache
-from dpgss.embedder import HFEmbedder
+from dpgss.embedding.embedder import HFEmbedder
 from dpgss.energy import HallucinationEnergyComputer
 from dpgss.policy.policy import AdaptivePercentilePolicy
 from dpgss.policy.difficulty import DEFAULT_THRESHOLDS, DEFAULT_WEIGHTS, DifficultyIndex
