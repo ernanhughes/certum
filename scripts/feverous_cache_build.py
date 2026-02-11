@@ -426,8 +426,8 @@ class Embedder:
         self._impl = None
         try:
             # If your project has this
-            from verity_gate.embedder import HFEmbedder  # type: ignore
-            self._impl = HFEmbedder(model_name=model_name)
+            from dpgss.embedding.embedder import HFEmbedder  # type: ignore
+            self._impl = HFEmbedder(model_name=model_name, embedding_db="E:\\data\\global_embeddings.db")
         except Exception:
             try:
                 from sentence_transformers import SentenceTransformer  # type: ignore

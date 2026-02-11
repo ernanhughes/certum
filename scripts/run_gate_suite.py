@@ -14,7 +14,8 @@ import numpy as np
 import uuid
 
 # Your new class architecture
-from dpgss.cache import FeverousCache
+from dpgss.embedding.sqlite_embedding_backend import SQLiteEmbeddingBackend
+from dpgss.evidence.sqlite_evidence_store import SQLiteEvidenceStore
 from dpgss.embedding.embedder import HFEmbedder
 from dpgss.energy import HallucinationEnergyComputer
 from dpgss.policy.policy import AdaptivePercentilePolicy
@@ -51,9 +52,11 @@ def get_adversarial_generator(mode: str, **kwargs) -> AdversarialPairGenerator:
 
 
 def run_gate_suite(
+    kind: str,    
     in_path: Path,
     model_name: str,
     cache_db: Path,
+    embedding_db: Path,
     regime: str,
     far: float,
     cal_frac: float,
@@ -73,13 +76,13 @@ def run_gate_suite(
     np.random.seed(seed)
     
     # 1. Load data
-    cache = FeverousCache(cache_db)
+    evidence_store = SQLiteEvidenceStore(cache_db)
     samples, load_stats = load_examples(
-        "feverous",
+        kind,
         in_path,
         n,
         seed,
-        cache=cache,
+        evidence_store=evidence_store,
         model=model_name,
     )
     if len(samples) < 50:
@@ -91,7 +94,8 @@ def run_gate_suite(
     eval_samples = samples[cal_n:]
     
     # 2. Build gate
-    embedder = HFEmbedder(model_name=model_name)
+    backend = SQLiteEmbeddingBackend(str(embedding_db))
+    embedder = HFEmbedder(model_name=model_name, backend=backend)
     ensure_vectors(samples, embedder)  
 
     energy_computer = HallucinationEnergyComputer(top_k=12, rank_r=8)
@@ -157,7 +161,9 @@ def run_gate_suite(
         embedder=embedder,   # required for hard_mined
         energy_computer=energy_computer,  # Required for hard_mined_v2
     )
-
+    print(f"Generated {len(neg_pairs)} adversarial NEGATIVE samples using mode '{neg_mode}'.")
+    print(json.dumps(neg_meta, indent=2))
+    
     neg_results = []
     for pair in neg_pairs:
         try:
@@ -268,9 +274,10 @@ def resolve_vectors(sample, embedder, claim_cache):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kind", required=True, choices=["feverous"])
+    ap.add_argument("--kind", required=True, choices=["feverous", "jsonl"], help="Dataset format. 'feverous' for FEVEROUS-style JSONL, 'jsonl' for generic rows with 'claim' and 'evidence' fields.")
     ap.add_argument("--in_path", type=Path, required=True)
     ap.add_argument("--cache_db", type=Path, default=None)  # Optional for future caching
+    ap.add_argument("--embedding_db", type=Path, default=None)  # Optional for future caching
     ap.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
     ap.add_argument("--regime", default="standard")
     ap.add_argument("--far", type=float, default=0.01)
@@ -288,9 +295,11 @@ def main():
     args = ap.parse_args()
     
     run_gate_suite(
+        kind=args.kind,
         in_path=args.in_path,
         model_name=args.model,
         cache_db=args.cache_db,
+        embedding_db=args.embedding_db,
         regime=args.regime,
         far=args.far,
         cal_frac=args.cal_frac,

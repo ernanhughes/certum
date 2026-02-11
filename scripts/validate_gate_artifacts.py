@@ -231,8 +231,16 @@ def validate_one(report_path: Path, artifacts_dir: Path) -> Tuple[Dict[str, Any]
         neg_rows = read_jsonl(neg_path)
 
         # energies must exist
-        pos_e = [safe_float(r.get("energy")) for r in pos_rows]
-        neg_e = [safe_float(r.get("energy")) for r in neg_rows]
+        def extract_energy(row):
+            # new schema
+            if "energy" in row and isinstance(row["energy"], dict):
+                return safe_float(row["energy"].get("energy"))
+
+            # legacy schema
+            return safe_float(row.get("energy"))
+
+        pos_e = [extract_energy(r) for r in pos_rows]
+        neg_e = [extract_energy(r) for r in neg_rows]
         pos_e = [x for x in pos_e if x is not None]
         neg_e = [x for x in neg_e if x is not None]
 

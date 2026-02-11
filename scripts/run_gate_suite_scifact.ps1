@@ -3,12 +3,12 @@ $env:TRANSFORMERS_VERBOSITY = "error"
 
 $CACHEDB = "E:\data\feverous_cache.db"
 $MODEL   = "sentence-transformers/all-MiniLM-L6-v2"
-$EMBEDDB = "E:\data\global_embeddings.db"
+$EMBEDDB = "E:\data\global_embeddings_test2.db"
 
 # $CACHEDB = "E:\data\feverous_cache_bge.db"
 # $MODEL = "BAAI/bge-large-en-v1.5"
 
-$DATA    = "E:\data\feverous_dev_complete.jsonl"
+$DATA    = "datasets\scifact_dev_rationale.jsonl"
 
 $REGIME  = "standard"
 $FAR     = "0.01"
@@ -21,13 +21,13 @@ $OUTDIR = "artifacts\runs\$RUNID"
 New-Item -ItemType Directory -Force -Path $OUTDIR | Out-Null
 
 function Run-One($MODE, $EXTRA_ARGS) {
-  $report = "$OUTDIR\feverous_negcal_$MODE.json"
+  $report = "$OUTDIR\scifact_negcal_$MODE.json"
   $pos    = "$OUTDIR\pos_$MODE.jsonl"
   $neg    = "$OUTDIR\neg_$MODE.jsonl"
   $plot   = "$OUTDIR\$MODE.png"
 
   py scripts\run_gate_suite.py `
-    --kind feverous `
+    --kind jsonl `
     --in_path $DATA `
     --cache_db $CACHEDB `
     --embedding_db $EMBEDDB `
