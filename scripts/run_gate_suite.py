@@ -19,37 +19,14 @@ from dpgss.embedding.sqlite_embedding_backend import SQLiteEmbeddingBackend
 from dpgss.evidence.sqlite_evidence_store import SQLiteEvidenceStore
 from dpgss.embedding.embedder import HFEmbedder
 from dpgss.energy import HallucinationEnergyComputer
-from dpgss.difficulty.spectral_difficulty import SpectralDifficulty
-from dpgss.policy.policy import AdaptivePercentilePolicy
+
+from dpgss.policy.policy import AdaptivePolicy
 from dpgss.gate import VerifiabilityGate
 from dpgss.calibration import AdaptiveCalibrator
 from dpgss.audit import AuditLogger
-from dpgss.adversarial import (
-    DerangedPairGenerator, HardMinedPairGeneratorV2, OffsetPairGenerator, CyclicPairGenerator,
-    PermutePairGenerator, HardMinedPairGenerator, AdversarialPairGenerator
-)
+from dpgss.adversarial import get_adversarial_generator
 from dpgss.dataset import load_examples
 from dpgss.plot import plot_distributions
-
-def get_adversarial_generator(mode: str, **kwargs) -> AdversarialPairGenerator:
-    off = kwargs.get("neg_offset", 37)
-    off = 37 if off is None else int(off) # Ensure offset is an integer for generators that require it
-
-    """Factory for negative calibration modes."""
-    if mode == "deranged":
-        return DerangedPairGenerator()
-    elif mode == "offset":
-        return OffsetPairGenerator(offset=off)
-    elif mode == "cyclic":
-        return CyclicPairGenerator()
-    elif mode == "permute":
-        return PermutePairGenerator()
-    elif mode == "hard_mined":
-        return HardMinedPairGenerator()
-    elif mode == "hard_mined_v2":
-        return HardMinedPairGeneratorV2()
-    else:
-        raise ValueError(f"Unknown neg_mode: {mode}")
 
 
 def run_gate_suite(
@@ -109,9 +86,9 @@ def run_gate_suite(
     ensure_vectors(samples, embedder)  
 
     energy_computer = HallucinationEnergyComputer(top_k=12, rank_r=8)
-
-    difficulty = SpectralDifficulty()  # Use defaults for now; can be extended to load from config
-    gate = VerifiabilityGate(embedder, energy_computer, difficulty)
+    
+    # Use defaults for now; can be extended to load from config
+    gate = VerifiabilityGate(embedder, energy_computer)
     
     # 3. Calibrate adaptive policy using NEGATIVE CONTROL ENERGIES
     print("\n⚙️ PHASE 3 — Calibration\n")
@@ -143,13 +120,36 @@ def run_gate_suite(
           f"(pos mean={np.mean(sweep_results['pos_energies']):.3f}, "
           f"neg mean={np.mean(sweep_results['neg_energies']):.3f})")
     
-    policy = AdaptivePercentilePolicy(
-        percentile=int(far * 100),
-        calibration_energies=sweep_results["neg_energies"],
-        hard_negative_gap=sweep_results["hard_negative_gap"],
-    )    
+    tau_energy = sweep_results["tau_by_percentile"][int(far * 100)]
 
-    # 5. Evaluate POSITIVE samples
+    assert tau_energy == sweep_results["tau_energy"], "Inconsistent tau values from calibration results."
+    policy = AdaptivePolicy(
+        tau_energy=sweep_results["tau_energy"],
+        tau_pr=sweep_results["tau_pr"],
+        tau_sensitivity=sweep_results["tau_sensitivity"],
+        hard_negative_gap=sweep_results["hard_negative_gap"],
+    )
+    
+
+    # 5 Calibrate Spectral Difficulty (Participation Ratio baseline from POSITIVES)
+    print("\n🧠 Calibrating Spectral Difficulty (PR baseline)\n")
+    cal_pos_results = []
+    for sample in cal_samples:
+        try:
+            result = gate.evaluate(
+                sample["claim"],
+                sample["evidence"],
+                policy,
+                run_id=run_id,
+                split="pos",
+            )
+            cal_pos_results.append(result)
+        except Exception:
+            continue
+
+
+
+    # 6. Evaluate POSITIVE samples
     pos_results = []
     print("\n🚦 PHASE 5 — Evaluating POS samples\n")
     for sample in tqdm(eval_samples, desc="POS evaluation", unit="sample"):
@@ -162,7 +162,7 @@ def run_gate_suite(
             print(f"⚠️  Skipping POS sample due to error: {e}")
             continue
     
-    # 6. Generate NEGATIVE samples via adversarial PAIR transformation
+    # 7. Generate NEGATIVE samples via adversarial PAIR transformation
     print("\n🔥 PHASE 6 — Generating adversarial negatives\n")
     adv_gen = get_adversarial_generator(neg_mode, neg_offset=neg_offset)
 
@@ -185,7 +185,7 @@ def run_gate_suite(
         except Exception as e:
             print(f"⚠️  Skipping NEG sample due to error: {e}")
     
-    # 7-9. Outputs, report, plot (unchanged - already correct)
+    # 8. Outputs, report, plot (unchanged - already correct)
     AuditLogger.write_run_header(
         out_report,
         {
@@ -208,7 +208,7 @@ def run_gate_suite(
     neg_summary = AuditLogger.generate_summary_report(neg_results)
     
     report_params = {
-        "tau_cal": tau,          # ← CRITICAL: validator expects this key
+        "tau_cal": tau,    
         "far": far,
         "neg_mode": neg_mode,
         "seed": seed,
@@ -218,7 +218,6 @@ def run_gate_suite(
     report = {
         "config": {
             "model": model_name,
-            "regime": regime,
             "far": far,
             "cal_frac": cal_frac,
             "n_total": n,
@@ -226,7 +225,7 @@ def run_gate_suite(
             "seed": seed
         },
         "stats": {
-            "eval": {                # Required by validator
+            "eval": {            
                 "FAR": far,
                 "TPR": "TBD",
                 "AUC": "TBD",

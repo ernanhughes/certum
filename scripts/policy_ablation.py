@@ -4,6 +4,11 @@ from pathlib import Path
 from typing import List, Dict
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+from dpgss.embedding.embedder import HFEmbedder
+from dpgss.embedding.sqlite_embedding_backend import SQLiteEmbeddingBackend
 
 
 # -----------------------------
@@ -27,10 +32,11 @@ def calibrate_difficulty_ranges_from_positives(pos_results: List[Dict]) -> Diffi
     for r in pos_results:
         if r["meta"]["split"] != "pos":
             continue
-        e = r["energy"]
-        margins.append(e["similarity"]["sim_margin"])
+        geom = r["energy"]["geometry"]
+
+        margins.append(geom["similarity"]["sim_margin"])
         rank_ratios.append(
-            e["support"]["effective_rank"] / max(1, len(r["evidence"]))
+            geom["spectral"]["effective_rank"] / max(1, len(r["evidence"]))
         )
     
     if not margins:
@@ -44,6 +50,16 @@ def calibrate_difficulty_ranges_from_positives(pos_results: List[Dict]) -> Diffi
         margin_p90=max(0.05, margin_p90),   # Safety floor
         rank_ratio_p90=max(0.1, rank_ratio_p90)
     )
+
+def compute_sigma1_alignment(result):
+    claim_vec = np.array(result["embedding"]["claim_vec"])  # adjust if stored differently
+    v1 = np.array(result["energy"]["spectral"]["v1"])
+    
+    claim_vec = claim_vec / (np.linalg.norm(claim_vec) + 1e-8)
+    v1 = v1 / (np.linalg.norm(v1) + 1e-8)
+    
+    return float(abs(np.dot(claim_vec, v1)))
+
 
 def recompute_difficulty_pure(
     sim_margin: float,
@@ -87,11 +103,11 @@ def patch_results_with_pure_difficulty(
     patched = []
     for r in results:
         # Extract raw metrics already stored in your schema
-        e = r["energy"]
-        sim_margin = e["similarity"]["sim_margin"]
-        effective_rank = e["support"]["effective_rank"]
+        geom = r["energy"]["geometry"] 
+        sim_margin = geom["similarity"]["sim_margin"]
+        effective_rank = geom["support"]["effective_rank"]
         evidence_count = len(r["evidence"])
-        sensitivity = e["robustness"]["sensitivity"]
+        sensitivity = geom["robustness"]["sensitivity"]
         
         # Recompute policy-agnostic difficulty
         new_diff = recompute_difficulty_pure(
@@ -211,6 +227,36 @@ def decide_energy_plus_difficulty(energy: float, difficulty: float, tau: float, 
     return "accept"
 
 
+def alignment_to_sigma1(result, embedder):
+    claim_text = result["claim"]
+    
+    claim_vec = embedder.embed([claim_text])[0]
+
+
+    # 🔴 FORCE 1D
+    claim_vec = np.asarray(claim_vec, dtype=np.float32)
+    if claim_vec.ndim == 2:
+        if claim_vec.shape[0] == 1:
+            claim_vec = claim_vec[0]
+        else:
+            raise ValueError(f"Unexpected claim_vec shape {claim_vec.shape}")
+
+    v1 = np.array(result["energy"]["spectral"]["v1"], dtype=np.float32)
+
+    if v1.size == 0:
+        return 0.0
+
+    # normalize both
+    claim_vec = claim_vec / (np.linalg.norm(claim_vec) + 1e-12)
+    v1 = v1 / (np.linalg.norm(v1) + 1e-12)
+
+    alignment = np.dot(claim_vec, v1)
+
+    # 🔴 force scalar
+    alignment = float(np.abs(alignment))
+
+    return alignment
+
 def auc_score(pos_vals: List[float], neg_vals: List[float]) -> float:
     """
     Compute AUC via rank comparison (no sklearn dependency).
@@ -238,24 +284,49 @@ def auc_score(pos_vals: List[float], neg_vals: List[float]) -> float:
 
 def extract_metric(results: List[Dict], key: str) -> List[float]:
     vals = []
+
     for r in results:
-        e = r["energy"]
+        geom = r["energy"]["geometry"]
 
         if key == "PR":
-            vals.append(e["participation_ratio"])
+            vals.append(geom["spectral"]["participation_ratio"])
+
         elif key == "sigma1":
-            vals.append(e["spectral"]["sigma1_ratio"])
+            vals.append(geom["spectral"]["sigma1_ratio"])
+
         elif key == "sim_margin":
-            vals.append(e["similarity"]["sim_margin"])
+            vals.append(geom["similarity"]["sim_margin"])
+
         elif key == "sensitivity":
-            vals.append(e["robustness"]["sensitivity"])
+            vals.append(geom["robustness"]["sensitivity"])
+
         else:
             raise ValueError(f"Unknown metric: {key}")
 
     return vals
 
+def conditional_auc(pr_vals, labels, energy_vals, tau_accept):
+    """
+    Compute AUC(PR) restricted to energy < tau_accept.
+    """
+
+    pr_vals = np.asarray(pr_vals)
+    labels = np.asarray(labels)
+    energy_vals = np.asarray(energy_vals)
+
+    mask = energy_vals < tau_accept
+
+    if mask.sum() < 10:
+        return None
+
+    try:
+        return roc_auc_score(labels[mask], pr_vals[mask])
+    except Exception as e:
+        print(f"Error computing conditional AUC: {e}")
+        return None
+
 # -----------------------------
-# Calibration at fixed FAR (unchanged)
+# Calibration at fixed FAR 
 # -----------------------------
 
 def find_tau_for_far_budget(neg: List[Point], target_far: float) -> float:
@@ -360,9 +431,9 @@ def compute_tpr(results):
 
 def extract_rank_stats(results):
     ranks = [
-        r["energy"]["support"]["effective_rank"]
+        r["energy"]["geometry"]["spectral"]["effective_rank"]
         for r in results
-    ]
+    ] 
     return {
         "mean": float(np.mean(ranks)),
         "std": float(np.std(ranks)),
@@ -428,15 +499,24 @@ def corr_energy_difficulty(rows, name: str):
     print(f"Corr(energy,difficulty) {name}: {c:.4f}")
 
 def spectral_stats(results):
-    sigma1 = [r["energy"]["spectral"]["sigma1_ratio"] for r in results]
-    sigma2 = [r["energy"]["spectral"]["sigma2_ratio"] for r in results]
-    pr = [r["energy"]["participation_ratio"] for r in results]
+    sigma1 = [r["energy"]["geometry"]["spectral"]["sigma1_ratio"] for r in results]
+    sigma2 = [r["energy"]["geometry"]["spectral"]["sigma2_ratio"] for r in results]
+    pr = [r["energy"]["geometry"]["spectral"]["participation_ratio"] for r in results]
 
     return {
         "mean_sigma1_ratio": float(np.mean(sigma1)),
         "mean_sigma2_ratio": float(np.mean(sigma2)),
         "mean_PR": float(np.mean(pr)),
     }
+
+
+def compute_corr(x, y):
+    x = np.asarray(x, dtype=np.float32)
+    y = np.asarray(y, dtype=np.float32)
+    if len(x) < 5:
+        return None
+    return float(np.corrcoef(x, y)[0, 1])
+
 
 
 def plot_rank_vs_energy(results, out_path: Path, title: str):
@@ -446,7 +526,7 @@ def plot_rank_vs_energy(results, out_path: Path, title: str):
     for r in results:
         if "energy" not in r:
             continue
-        ranks.append(r["energy"]["support"]["effective_rank"])
+        ranks.append(r["energy"]["geometry"]["support"]["effective_rank"])
         energies.append(r["energy"]["value"])
 
     if not ranks:
@@ -475,8 +555,8 @@ def plot_similarity_diagnostics(results, out_prefix: Path, title_prefix: str):
     for r in results:
         e = r["energy"]
         energy.append(e["value"])
-        rank.append(e["support"]["effective_rank"])
-        s = r["energy"]["similarity"]
+        rank.append(e["geometry"]["support"]["effective_rank"])
+        s = r["energy"]["geometry"]["similarity"]
         sim_margin.append(s.get("sim_margin", 0.0))
         sim_top1.append(s.get("sim_top1", 0.0))
         sim_top2.append(s.get("sim_top2", 0.0))
@@ -851,12 +931,121 @@ if __name__ == "__main__":
         auc = auc_score(pos_vals, neg_vals)
         print(f"AUC({m}) = {auc:.4f}")
 
+    # -----------------------------------------
+    # CONDITIONAL AUC (Energy Acceptance Band)
+    # -----------------------------------------
+
+    tau = tau_hard  # or whichever tau you're testing
+
+    all_pr = [r["energy"]["geometry"]["spectral"]["participation_ratio"] for r in pos_hard + neg_hard]
+    all_energy = [r["energy"]["value"] for r in pos_hard + neg_hard]
+    all_labels = [1]*len(pos_hard) + [0]*len(neg_hard)
+
+    auc_cond = conditional_auc(all_pr, all_labels, all_energy, tau)
+
+    print("\n=== CONDITIONAL AUC (energy < tau) ===")
+    print(f"AUC(PR | energy < {tau:.3f}) = {auc_cond}")
+
+
+    # Build arrays
+    alignments = []
+    labels = []
+    for r in pos_hard:
+        alignments.append(
+            r["energy"]["geometry"]["alignment"]["alignment_to_sigma1"]
+        )
+        labels.append(1)
+
+    for r in neg_hard:
+        alignments.append(
+            r["energy"]["geometry"]["alignment"]["alignment_to_sigma1"]
+        )
+        labels.append(0)
+
+    auc_align = roc_auc_score(labels, alignments)
+    print(f"AUC(alignment_to_sigma1) = {auc_align:.4f}")
+
+    tau = tau_hard  # or whichever tau you're testing
+
+    align_cond = []
+    labels_cond = []
+
+    for r in pos_hard:
+        if r["energy"]["value"] < tau:
+            align_cond.append(
+                r["energy"]["geometry"]["alignment"]["alignment_to_sigma1"]
+            )
+            labels_cond.append(1)
+
+    for r in neg_hard:
+        if r["energy"]["value"] < tau:
+            align_cond.append(
+                r["energy"]["geometry"]["alignment"]["alignment_to_sigma1"]
+            )
+            labels_cond.append(0)
+
+    if len(set(labels_cond)) > 1:
+        auc_cond = roc_auc_score(labels_cond, align_cond)
+        print(f"AUC(alignment_to_sigma1 | energy < tau) = {auc_cond:.4f}")
+    else:
+        print("Conditional AUC not computable.")
+
+        if len(set(labels_cond)) > 1:
+            auc_cond = roc_auc_score(labels_cond, align_cond)
+            print(f"AUC(alignment_to_sigma1 | energy < tau) = {auc_cond:.4f}")
+        else:
+            print("Conditional AUC not computable.")
+
+
+    energies_hard = []
+    alignments_hard = []
+
+    for r in pos_hard + neg_hard:
+        energies_hard.append(r["energy"]["value"])
+        alignments_hard.append(
+            r["energy"]["geometry"]["alignment"]["alignment_to_sigma1"]
+        )
+
+    corr_hard = compute_corr(energies_hard, alignments_hard)
+
+    print("\n=== ORTHOGONALITY TEST (HARD-MINED) ===")
+    print(f"Corr(energy, alignment_to_sigma1) = {corr_hard:.4f}")
+
+
+    energies_pos = [r["energy"]["value"] for r in pos_hard]
+    align_pos = [r["energy"]["geometry"]["alignment"]["alignment_to_sigma1"] for r in pos_hard]
+
+
+    energies_neg = [r["energy"]["value"] for r in neg_hard]
+    align_neg = [r["energy"]["geometry"]["alignment"]["alignment_to_sigma1"] for r in neg_hard]
+
+    corr_pos = compute_corr(energies_pos, align_pos)
+    corr_neg = compute_corr(energies_neg, align_neg)
+
+    print("\n=== ORTHOGONALITY TEST (SEPARATED) ===")
+    print(f"POS Corr(E,A) = {corr_pos:.4f}")
+    print(f"NEG Corr(E,A) = {corr_neg:.4f}")
+
 
     print("\nCorrelation rank↔energy (deranged POS, patched):",
         np.corrcoef(
-            [r["energy"]["support"]["effective_rank"] for r in pos_der],
+            [r["energy"]["geometry"]["spectral"]["effective_rank"] for r in pos_der],
             [r["energy"]["value"] for r in pos_der]
         )[0,1])
 
+    pr_values = [
+        r["energy"]["geometry"]["spectral"]["participation_ratio"]
+        for r in pos_hard + neg_hard
+    ]
+
+    sens_values = [
+        r["energy"]["geometry"]["robustness"]["sensitivity"]
+        for r in pos_hard + neg_hard
+    ]
+
+    print("Corr(E, PR) =", compute_corr(energies_hard, pr_values))
+    print("Corr(E, Sens) =", compute_corr(energies_hard, sens_values))
+    print("Corr(PR, Sens) =", compute_corr(pr_values, sens_values))
+
     print("\n✅ Pure ambiguity calibration complete.")
-    print("   Next: Check correlation diagnostics for orthogonality (target: |Corr(E,D)| > 0.20 on hard-mined negatives)")
+    print("   Next: Check correlation diagnostics for orthogonality (target: |Corr(E, alignment)| < 0.20 (orthogonality goal)")

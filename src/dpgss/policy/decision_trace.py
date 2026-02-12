@@ -5,19 +5,23 @@ from typing import Optional
 @dataclass(frozen=True)
 class DecisionTrace:
     """
-    Deterministic explanation of a policy decision.
-
-    A structured record of the policy state at decision time.
+    Deterministic explanation of a 3-axis geometry-aware policy decision.
     """
 
-    # Core signals
+    # === Core Energy Axis ===
     energy: float
-    difficulty: float
+    alignment: float  # |dot(claim, v1)|
+
+    # === Geometry Axis ===
+    participation_ratio: float
+    sensitivity: float
     effectiveness: float
 
     # Policy thresholds
     tau_accept: Optional[float]
     tau_review: Optional[float]
+    pr_threshold: Optional[float]
+    sensitivity_threshold: Optional[float]
     margin_band: Optional[float]
 
     # Policy metadata
@@ -30,7 +34,6 @@ class DecisionTrace:
     def to_dict(self) -> dict:
         return asdict(self)
 
-
 def why_rejected(trace: DecisionTrace) -> str:
     """
     Deterministic explanation for REJECT verdicts.
@@ -41,11 +44,14 @@ def why_rejected(trace: DecisionTrace) -> str:
 
     reasons = []
 
-    if trace.tau_review is not None and trace.energy > trace.tau_review:
+    if trace.tau_review and trace.energy > trace.tau_review:
         reasons.append("Energy exceeds review threshold.")
 
-    if trace.difficulty > 0.75:
-        reasons.append("Difficulty exceeds hard threshold.")
+    if trace.pr_threshold and trace.participation_ratio > trace.pr_threshold:
+        reasons.append("Evidence manifold too diffuse (high PR).")
+
+    if trace.sensitivity_threshold and trace.sensitivity > trace.sensitivity_threshold:
+        reasons.append("High brittleness (LOO sensitivity).")
 
     if trace.effectiveness < 0.05:
         reasons.append("Insufficient effectiveness margin.")

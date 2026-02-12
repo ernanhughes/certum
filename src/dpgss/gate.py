@@ -3,10 +3,9 @@ from typing import List, Optional
 from dpgss.policy.decision_trace import DecisionTrace
 
 
-from dpgss.custom_types import EnergyResult, EvaluationResult
+from dpgss.custom_types import DecisionAxes, EnergyResult, EvaluationResult
 from dpgss.energy import HallucinationEnergyComputer
 from dpgss.difficulty.difficulty_metrics import DifficultyMetrics
-from dpgss.difficulty.spectral_difficulty import SpectralDifficulty
 from dpgss.protocols.embedder import Embedder
 from dpgss.policy.policy import Policy
 import numpy as np
@@ -16,11 +15,9 @@ class VerifiabilityGate:
         self,
         embedder: Embedder,
         energy_computer: HallucinationEnergyComputer,
-        difficulty_index: SpectralDifficulty
     ):
         self.embedder = embedder
         self.energy_computer = energy_computer
-        self.difficulty_index = difficulty_index
 
     
     def compute_energy(
@@ -72,21 +69,26 @@ class VerifiabilityGate:
         
         # 3. Build metrics (data only)
         metrics = DifficultyMetrics(
-            sensitivity=base.sensitivity,
-            sim_margin=base.sim_margin,
+            sensitivity=base.geometry.sensitivity,
+            sim_margin=base.geometry.sim_margin,
             evidence_count=int(ev_vecs.shape[0]),
-            effective_rank=int(base.effective_rank),
-            participation_ratio=float(base.participation_ratio),
+            effective_rank=int(base.geometry.effective_rank),
+            participation_ratio=float(base.geometry.participation_ratio),
         )
 
         # 4. Policy decision
-        difficulty_value = self.difficulty_index.compute(metrics)
+        axes = DecisionAxes(
+            energy=base.energy,
+            participation_ratio=base.geometry.participation_ratio,
+            sensitivity=base.geometry.sensitivity,
+            alignment=base.geometry.alignment_to_sigma1,
+            sim_margin=base.geometry.sim_margin,
+        )
 
         # 5. Compute difficulty index (scalar)
         effectiveness = self.effectiveness_score(base.energy, policy.tau_accept)
 
-        # 6. Final verdict All right something All right so let's start    
-        verdict = policy.decide(base, difficulty_value, effectiveness)
+        verdict = policy.decide(axes, effectiveness)
 
         embedding_info = {
             "claim_dim": int(claim_vec.shape[0]),
@@ -94,18 +96,19 @@ class VerifiabilityGate:
             "embedding_backend": self.embedder.name,
         }
 
-        tau_accept = policy.tau_accept
-        tau_review = policy.tau_review
-        margin = 0.1 * tau_accept
-
+        geom = base.geometry
 
         decision_trace = DecisionTrace(
             energy=base.energy,
-            difficulty=difficulty_value,
+            alignment=geom.alignment_to_sigma1,
+            participation_ratio=geom.participation_ratio,
+            sensitivity=geom.sensitivity,
+            tau_accept=policy.tau_accept,
+            tau_review=policy.tau_review,
+            pr_threshold=policy.pr_threshold,
+            sensitivity_threshold=policy.sensitivity_threshold,
             effectiveness=effectiveness,
-            tau_accept=tau_accept,
-            tau_review=tau_review,
-            margin_band=margin,
+            margin_band=0.1 * policy.tau_accept if policy.tau_accept else None,
             policy_name=policy.name,
             hard_negative_gap=policy.hard_negative_gap,
             verdict=verdict.value,
@@ -123,28 +126,18 @@ class VerifiabilityGate:
             policy_applied=policy.name,
             split=split,
             neg_mode=neg_mode,
-            difficulty_value=difficulty_value,
-            difficulty_bucket=self.bucket_difficulty(difficulty_value)
         ) 
     
     def policy_log_row(result: EvaluationResult) -> dict:
         return {
             "energy": result.energy_result.energy,
-            "difficulty": result.difficulty_value,
             "difficulty_bucket": result.difficulty_bucket,
             "verdict": result.verdict.value,
             "policy": result.policy_applied,
         }
-
+   
     def effectiveness_score(self, energy: float, tau: float) -> float:
         """
         How much margin we have relative to policy threshold.
         """
         return max(0.0, (tau - energy) / max(tau, 1e-6))
-
-    def bucket_difficulty(self, value: float) -> str:
-        if value <= 0.40:
-            return "easy"
-        if value <= 0.75:
-            return "medium"
-        return "hard"

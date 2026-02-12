@@ -13,7 +13,7 @@ $DATA    = "E:\data\feverous_dev_complete.jsonl"
 $REGIME  = "standard"
 $FAR     = "0.01"
 $CALFRAC = "0.5"
-$N       = "1000"
+$N       = "5000"
 $SEED    = "1337"
 
 $RUNID = (Get-Date -Format "yyyyMMdd_HHmmss")

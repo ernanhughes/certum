@@ -374,3 +374,24 @@ class HardMinedPairGeneratorV2(AdversarialPairGenerator):
             "max_energy": float(np.max(chosen_energies)),
         }
         return negs, meta
+    
+def get_adversarial_generator(mode: str, **kwargs) -> AdversarialPairGenerator:
+    off = kwargs.get("neg_offset", 37)
+    off = 37 if off is None else int(off) # Ensure offset is an integer for generators that require it
+
+    """Factory for negative calibration modes."""
+    if mode == "deranged":
+        return DerangedPairGenerator()
+    elif mode == "offset":
+        return OffsetPairGenerator(offset=off)
+    elif mode == "cyclic":
+        return CyclicPairGenerator()
+    elif mode == "permute":
+        return PermutePairGenerator()
+    elif mode == "hard_mined":
+        return HardMinedPairGenerator()
+    elif mode == "hard_mined_v2":
+        return HardMinedPairGeneratorV2()
+    else:
+        raise ValueError(f"Unknown neg_mode: {mode}")
+

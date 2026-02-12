@@ -1,23 +1,24 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
+from dataclasses import dataclass
 
-from dpgss.custom_types import EnergyResult, Verdict
-import numpy as np
+from dpgss.custom_types import Verdict, DecisionAxes
 
 
 class Policy(ABC):
-    """Abstract policy interface - deterministic decision boundary."""
+    """
+    Deterministic multi-axis decision boundary.
+    """
 
-    hard_negative_gap: float = 0.0  # default, safe for fixed policies
-    tau_accept: float = 0.0  # default, safe for fixed policies
-    tau_review: Optional[float] = None  # default, safe for fixed policies
+    tau_accept: float = 0.0
+    tau_review: Optional[float] = None
+    hard_negative_gap: float = 0.0
 
     @abstractmethod
     def decide(
         self,
-        energy_result: EnergyResult,
-        difficulty_value: float,
-        effectiveness_score: float,
+        axes: DecisionAxes,
+        effectiveness_score: float
     ) -> Verdict:
         pass
 
@@ -28,11 +29,15 @@ class Policy(ABC):
 
 
 class FixedThresholdPolicy(Policy):
-    """Static energy threshold (legacy systems)."""
+    """
+    Pure energy-only baseline.
+    """
 
     def __init__(self, tau_accept: float, tau_review: Optional[float] = None):
         self.tau_accept = tau_accept
         self.tau_review = tau_review or (tau_accept * 1.25)
+        self.pr_threshold: float = 8.0,
+        self.sensitivity_threshold: float = 0.4,
 
     @property
     def name(self) -> str:
@@ -40,66 +45,109 @@ class FixedThresholdPolicy(Policy):
 
     def decide(
         self,
-        energy_result: EnergyResult,
-        difficulty_value: float,
-        effectiveness_score: float,
+        axes: DecisionAxes
     ) -> Verdict:
-        if energy_result.energy <= self.tau_accept:
+
+        if axes.energy <= self.tau_accept:
             return Verdict.ACCEPT
-        if energy_result.energy <= self.tau_review:
+
+        if axes.energy <= self.tau_review:
             return Verdict.REVIEW
+
         return Verdict.REJECT
 
+@dataclass
+class RoadGateThresholds:
+    tau_energy: float
+    tau_energy_review: float
+    tau_pr: float
+    tau_sensitivity: float
 
-class AdaptivePercentilePolicy(Policy):
+
+class RoadGatePolicy(Policy):
+
+    def __init__(self, thresholds: RoadGateThresholds):
+        self.t = thresholds
+
+    @property
+    def name(self):
+        return "roadgate.v3"
+
+    def decide(self, axes: DecisionAxes, effectiveness_score: float) -> Verdict:
+
+        E = axes.energy
+        R = axes.participation_ratio
+        S = axes.sensitivity
+
+        # Hard reject
+        if E > self.t.tau_energy_review:
+            return Verdict.REJECT
+
+        # Accept region
+        if (
+            E <= self.t.tau_energy
+            and R <= self.t.tau_pr
+            and S <= self.t.tau_sensitivity
+        ):
+            return Verdict.ACCEPT
+
+        return Verdict.REVIEW
+
+
+class AdaptivePolicy(Policy):
     """
-    Percentile-calibrated policy (your key innovation).
-    Thresholds learned from data distribution, not hand-tuned.
+    3D RoadGate Surface:
+        Energy + Participation Ratio + Sensitivity
     """
 
     def __init__(
         self,
-        percentile: int,
-        calibration_energies: List[float],
         *,
+        tau_energy: float,
+        tau_pr: float,
+        tau_sensitivity: float,
+        tau_review: Optional[float] = None,
         hard_negative_gap: float = 0.0,
     ):
-        if not (1 <= percentile <= 100):
-            raise ValueError("Percentile must be 1-100")
+        self.tau_accept = tau_energy
+        self.tau_review = tau_review or (tau_energy * 1.25)
+        self.hard_negative_gap = hard_negative_gap
 
-        self.percentile = percentile
-        self.tau_accept = float(np.percentile(calibration_energies, percentile))
-        self.tau_review = self.tau_accept * 1.25
-        self.hard_negative_gap = float(hard_negative_gap)
+        self.pr_threshold = tau_pr
+        self.sensitivity_threshold = tau_sensitivity
 
     @property
     def name(self) -> str:
-        return f"adaptive.P{self.percentile}"
+        return f"AdaptivePolicy(tau_energy={self.tau_accept:.2f}, tau_pr={self.pr_threshold:.2f}, tau_sensitivity={self.sensitivity_threshold:.2f})"
 
     def decide(
         self,
-        energy_result: EnergyResult,
-        difficulty_value: float,
-        effectiveness_score: float,
-    ) -> Verdict:
-        energy = energy_result.energy
-        tau = self.tau_accept
-        margin = 0.1 * tau  # policy margin band
+        axes: DecisionAxes,
+        effectiveness_score: float
 
-        # Region C: Unsafe
-        if (
-            difficulty_value > 0.75
-            or energy > self.tau_review
-            or effectiveness_score < 0.05
-        ):
+    ) -> Verdict:
+
+        # Hard reject region
+        if axes.energy > self.tau_review:
             return Verdict.REJECT
 
-        # Region B: Hard / ambiguous
-        if difficulty_value > 0.4 or abs(energy - tau) <= margin:
+        # Secondary axes
+        if axes.participation_ratio > self.pr_threshold:
             return Verdict.REVIEW
 
-        # Region A: Safe
-        return Verdict.ACCEPT
+        if axes.sensitivity > self.sensitivity_threshold:
+            return Verdict.REVIEW
+
+        # Border band
+        margin = 0.1 * self.tau_accept
+        if abs(axes.energy - self.tau_accept) <= margin:
+            return Verdict.REVIEW
+
+        # Accept region
+        if axes.energy <= self.tau_accept:
+            return Verdict.ACCEPT
+
+        return Verdict.REJECT
 
 
 class PolicyRegistry:
@@ -121,6 +169,8 @@ class PolicyRegistry:
 
     @classmethod
     def get_adaptive(
-        cls, percentile: int, calibration_energies: List[float]
-    ) -> AdaptivePercentilePolicy:
-        return AdaptivePercentilePolicy(percentile, calibration_energies)
+        cls,
+        percentile: int,
+        calibration_energies: List[float],
+    ) -> AdaptivePolicy:
+        return AdaptivePolicy(percentile, calibration_energies)

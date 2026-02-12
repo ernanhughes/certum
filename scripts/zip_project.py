@@ -9,7 +9,7 @@ def should_exclude(path):
     parts = path.split(os.sep)
     return any(part in EXCLUDE_DIRS or part.endswith(EXCLUDE_SUFFIXES) for part in parts)
 
-def zip_project_directory(source_dir: str, output_filename: str = "verity.zip"):
+def zip_project_directory(source_dir: str, output_filename: str = "dpgss.zip"):
     with zipfile.ZipFile(output_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(source_dir):
             # Remove excluded directories from the walk
@@ -26,4 +26,4 @@ def zip_project_directory(source_dir: str, output_filename: str = "verity.zip"):
 
 # Example usage
 if __name__ == "__main__":
-    zip_project_directory("packages/")
+    zip_project_directory("dpgss/")

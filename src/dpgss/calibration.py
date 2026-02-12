@@ -2,10 +2,13 @@
 from typing import List, Tuple, Dict, Any, Optional
 import random
 import numpy as np
+import logging
 
 from dpgss.energy import HallucinationEnergyComputer
 from dpgss.protocols.embedder import Embedder
 from dpgss.gate import VerifiabilityGate
+
+logger = logging.getLogger(__name__)
 
 class AdaptiveCalibrator:
     """
@@ -28,8 +31,10 @@ class AdaptiveCalibrator:
         neg_offset: int = 37,
         seed: int = 1337,
     ) -> Dict[str, Any]:
-        # 1. Compute energies on POSITIVE samples
+        # 1. Compute energies/sensitivity/participation_ratio values for POSITIVE
         pos_energies = []
+        pos_pr_values = []
+        pos_sensitivity_values = []
         for claim, ev in zip(claims, evidence_vecs):
             if claim in claim_vec_cache:
                 claim_vec = claim_vec_cache[claim]
@@ -37,13 +42,24 @@ class AdaptiveCalibrator:
                 claim_vec = self.embedder.embed([claim])[0]
                 claim_vec_cache[claim] = claim_vec
 
-            energy = self.gate.energy_computer.compute(
+            res = self.gate.energy_computer.compute(
                 claim_vec=claim_vec,
                 evidence_vecs=ev,
-            ).energy
-
+            )
+            energy = res.energy
+            pos_pr_values.append(res.geometry.participation_ratio)
+            pos_sensitivity_values.append(res.geometry.sensitivity)
             pos_energies.append(energy)
         
+
+        tau_pr = float(np.percentile(pos_pr_values, 90))
+        tau_sensitivity = float(np.percentile(pos_sensitivity_values, 90))
+
+        tau_pr_by_percentile = {
+            p: float(np.percentile(pos_pr_values, 100 - p))
+            for p in percentiles
+        }
+
         # 2. Compute NEGATIVE energies (easy baseline: deranged)
         neg_energies_deranged = self._compute_neg_energies(
             claims=claims,
@@ -75,6 +91,7 @@ class AdaptiveCalibrator:
             neg_energies_deranged,
             neg_energies_hard,
         )
+
         std_ref = float(np.std(neg_energies_deranged))
         if std_ref < 1e-6:
             hard_negative_gap_norm = 0.0
@@ -87,15 +104,23 @@ class AdaptiveCalibrator:
         tau_by_percentile = {p: float(np.percentile(neg_energies_hard, p)) for p in percentiles}
         separation_delta = np.mean(neg_energies_hard) - np.mean(pos_energies) if pos_energies and neg_energies_hard else 0.0
 
-        print(
+        logger.info(
             f"[Calibration] mean_deranged={np.mean(neg_energies_deranged):.4f} "
             f"mean_hard={np.mean(neg_energies_hard):.4f} "
             f"gap={hard_negative_gap:.4f} "
             f"gap_norm={hard_negative_gap_norm:.4f}"
         )
+        p = percentiles[0]
+        tau_energy = float(np.percentile(neg_energies_hard, p))
+
 
         return {
+            "tau_energy": tau_energy,
+            "tau_sensitivity": tau_sensitivity,
+            "tau_pr": tau_pr,
             "tau_by_percentile": tau_by_percentile,
+            "tau_energy_by_percentile": tau_by_percentile,
+            "tau_pr_by_percentile": tau_pr_by_percentile,
             "pos_energies": pos_energies,
             "neg_energies": neg_energies_hard,
             "separation_delta": separation_delta,
