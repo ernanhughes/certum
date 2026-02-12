@@ -6,3 +6,4 @@ class DifficultyMetrics:
     sensitivity: float
     evidence_count: int  
     effective_rank: int  
+    participation_ratio: float  

@@ -5,8 +5,8 @@ from dpgss.policy.decision_trace import DecisionTrace
 
 from dpgss.custom_types import EnergyResult, EvaluationResult
 from dpgss.energy import HallucinationEnergyComputer
-from dpgss.policy.difficulty_metrics import DifficultyMetrics
-from dpgss.policy.difficulty import Difficulty, DifficultyRanges
+from dpgss.difficulty.difficulty_metrics import DifficultyMetrics
+from dpgss.difficulty.spectral_difficulty import SpectralDifficulty
 from dpgss.protocols.embedder import Embedder
 from dpgss.policy.policy import Policy
 import numpy as np
@@ -16,7 +16,7 @@ class VerifiabilityGate:
         self,
         embedder: Embedder,
         energy_computer: HallucinationEnergyComputer,
-        difficulty_index: Difficulty
+        difficulty_index: SpectralDifficulty
     ):
         self.embedder = embedder
         self.energy_computer = energy_computer
@@ -70,25 +70,22 @@ class VerifiabilityGate:
         # 2. Compute base energy
         base = self.energy_computer.compute(claim_vec, ev_vecs)
         
-        # 4. Robustness probe
-        probe = self.energy_computer.compute_robustness_probe(claim_vec, ev_vecs)
-        robust_var = float(np.var(probe))
-
-        # 5. Build metrics (data only)
+        # 3. Build metrics (data only)
         metrics = DifficultyMetrics(
             sensitivity=base.sensitivity,
             sim_margin=base.sim_margin,
             evidence_count=int(ev_vecs.shape[0]),
             effective_rank=int(base.effective_rank),
+            participation_ratio=float(base.participation_ratio),
         )
 
-        # 6. Compute difficulty index (scalar)
-        effectiveness = self.effectiveness_score(base.energy, policy.tau_accept)
-
-        # 7. Policy decision
+        # 4. Policy decision
         difficulty_value = self.difficulty_index.compute(metrics)
 
-        # 8. Final verdict All right something All right so let's start    
+        # 5. Compute difficulty index (scalar)
+        effectiveness = self.effectiveness_score(base.energy, policy.tau_accept)
+
+        # 6. Final verdict All right something All right so let's start    
         verdict = policy.decide(base, difficulty_value, effectiveness)
 
         embedding_info = {
@@ -126,7 +123,6 @@ class VerifiabilityGate:
             policy_applied=policy.name,
             split=split,
             neg_mode=neg_mode,
-            robustness_probe=probe,
             difficulty_value=difficulty_value,
             difficulty_bucket=self.bucket_difficulty(difficulty_value)
         ) 

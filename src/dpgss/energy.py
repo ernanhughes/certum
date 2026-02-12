@@ -51,8 +51,18 @@ class HallucinationEnergyComputer:
         
         c = _unit_norm(claim_vec)
         E = _unit_norm_rows(evidence_vecs)
-        basis, effective_rank = self._build_evidence_basis(c, E)
-        
+        basis, effective_rank, S = self._build_evidence_basis(c, E)
+
+        eps = 1e-12
+        sum_sigma = np.sum(S)
+        sigma1 = float(S[0]) if len(S) > 0 else 0.0
+        sigma2 = float(S[1]) if len(S) > 1 else 0.0
+        sigma1_ratio = sigma1 / max(sum_sigma, eps)
+        sigma2_ratio = sigma2 / max(sum_sigma, eps)
+
+        sum_sq = np.sum(S ** 2)
+        participation_ratio = (sum_sigma ** 2) / (sum_sq + eps)
+
         projected = basis.T @ c
         explained = float(np.dot(projected, projected))
         energy = 1.0 - explained
@@ -79,6 +89,7 @@ class HallucinationEnergyComputer:
         else:
             sensitivity = float(np.max(sims_topk) / np.sum(sims_topk))
 
+
         return EnergyResult(
             energy=max(0.0, min(1.0, energy)),
             explained=max(0.0, min(1.0, explained)),
@@ -93,7 +104,13 @@ class HallucinationEnergyComputer:
 
             sim_top1=sim_top1,
             sim_top2=sim_top2,
-            sim_margin=sim_margin
+            sim_margin=sim_margin,
+            participation_ratio=float(participation_ratio),
+
+            sigma1_ratio=float(sigma1_ratio),
+            sigma2_ratio=float(sigma2_ratio),
+            spectral_sum=float(sum_sigma),
+
         )
     
     def compute_robustness_probe(
@@ -163,7 +180,7 @@ class HallucinationEnergyComputer:
         basis = Vt[:r].T
         
         effective_rank = int(np.sum(S > 1e-6))
-        return basis.astype(np.float32), effective_rank
+        return basis.astype(np.float32), effective_rank, S
     
 
 def _unit_norm(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:

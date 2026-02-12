@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 from dpgss.custom_types import EvaluationResult
-from dpgss.policy.difficulty_metrics import DifficultyMetrics
+from dpgss.difficulty.difficulty_metrics import DifficultyMetrics
 
 @dataclass(frozen=True)
 class DifficultyRanges:

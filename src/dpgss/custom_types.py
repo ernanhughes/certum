@@ -28,7 +28,12 @@ class EnergyResult:
     sim_top1: float = 0.0
     sim_top2: float = 0.0
     sim_margin: float = 0.0
+    participation_ratio: float = 0.0   
 
+    sigma1_ratio: float = 0.0
+    sigma2_ratio: float = 0.0
+    spectral_sum: float = 0.0
+    
     def is_stable(self, threshold: float = 1e-4) -> bool:
         return self.identity_error < threshold
 
@@ -37,6 +42,7 @@ class EnergyResult:
             "value": self.energy,
             "explained": self.explained,
             "identity_error": self.identity_error,
+            "participation_ratio": self.participation_ratio,
 
             "config": {
                 "evidence_topk": self.evidence_topk,
@@ -57,8 +63,15 @@ class EnergyResult:
 
             "robustness": {
                 "sensitivity": self.sensitivity,
+            },
+
+            "spectral": {
+                "sigma1_ratio": self.sigma1_ratio,
+                "sigma2_ratio": self.sigma2_ratio,
+                "spectral_sum": self.spectral_sum,
             }
         }
+
 
 @dataclass(frozen=True)
 class EvaluationResult:

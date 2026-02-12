@@ -211,6 +211,49 @@ def decide_energy_plus_difficulty(energy: float, difficulty: float, tau: float, 
     return "accept"
 
 
+def auc_score(pos_vals: List[float], neg_vals: List[float]) -> float:
+    """
+    Compute AUC via rank comparison (no sklearn dependency).
+    AUC = P(neg > pos)
+    """
+    pos = np.array(pos_vals)
+    neg = np.array(neg_vals)
+
+    if len(pos) == 0 or len(neg) == 0:
+        return float("nan")
+
+    # Pairwise comparison
+    total = 0
+    correct = 0
+
+    for n in neg:
+        for p in pos:
+            total += 1
+            if n > p:
+                correct += 1
+            elif n == p:
+                correct += 0.5
+
+    return correct / total
+
+def extract_metric(results: List[Dict], key: str) -> List[float]:
+    vals = []
+    for r in results:
+        e = r["energy"]
+
+        if key == "PR":
+            vals.append(e["participation_ratio"])
+        elif key == "sigma1":
+            vals.append(e["spectral"]["sigma1_ratio"])
+        elif key == "sim_margin":
+            vals.append(e["similarity"]["sim_margin"])
+        elif key == "sensitivity":
+            vals.append(e["robustness"]["sensitivity"])
+        else:
+            raise ValueError(f"Unknown metric: {key}")
+
+    return vals
+
 # -----------------------------
 # Calibration at fixed FAR (unchanged)
 # -----------------------------
@@ -383,6 +426,18 @@ def corr_energy_difficulty(rows, name: str):
     d = np.array([float(r["difficulty"]["value"]) for r in rows], dtype=np.float32)
     c = float(np.corrcoef(e, d)[0, 1]) if len(rows) > 2 else float("nan")
     print(f"Corr(energy,difficulty) {name}: {c:.4f}")
+
+def spectral_stats(results):
+    sigma1 = [r["energy"]["spectral"]["sigma1_ratio"] for r in results]
+    sigma2 = [r["energy"]["spectral"]["sigma2_ratio"] for r in results]
+    pr = [r["energy"]["participation_ratio"] for r in results]
+
+    return {
+        "mean_sigma1_ratio": float(np.mean(sigma1)),
+        "mean_sigma2_ratio": float(np.mean(sigma2)),
+        "mean_PR": float(np.mean(pr)),
+    }
+
 
 def plot_rank_vs_energy(results, out_path: Path, title: str):
     ranks = []
@@ -771,6 +826,31 @@ if __name__ == "__main__":
         run_dir / "neg_hard_mined_v2_patched",
         "NEG Hard-Mined (patched)"
     )
+
+    print("\n=== Spectral Diagnostics ===")
+    print("POS deranged:", spectral_stats(pos_der))
+    print("NEG deranged:", spectral_stats(neg_der))
+    print("POS hard-mined:", spectral_stats(pos_hard))
+    print("NEG hard-mined:", spectral_stats(neg_hard))
+
+
+    print("\n=== AUC Diagnostics (POS vs NEG) ===")
+    metrics = ["PR", "sigma1", "sim_margin", "sensitivity"]
+    for m in metrics:
+        pos_vals = extract_metric(pos_hard, m)
+        neg_vals = extract_metric(neg_hard, m)
+
+        auc = auc_score(pos_vals, neg_vals)
+        print(f"AUC({m}) = {auc:.4f}")
+    
+    print("\n=== AUC Diagnostics (DERANGED) ===")
+    for m in metrics:
+        pos_vals = extract_metric(pos_der, m)
+        neg_vals = extract_metric(neg_der, m)
+
+        auc = auc_score(pos_vals, neg_vals)
+        print(f"AUC({m}) = {auc:.4f}")
+
 
     print("\nCorrelation rank↔energy (deranged POS, patched):",
         np.corrcoef(
