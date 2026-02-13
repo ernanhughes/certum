@@ -4,11 +4,13 @@ from typing import List, Optional
 import numpy as np
 import logging
 
-from certum.custom_types import DecisionAxes, EnergyResult, EvaluationResult
+from certum.custom_types import EnergyResult, EvaluationResult
+from certum.axes.bundle import AxisBundle
 from certum.energy import HallucinationEnergyComputer
 from certum.protocols.embedder import Embedder
-from certum.policy.policy import Policy
+from certum.protocols.policy import Policy
 from certum.policy.decision_trace import DecisionTrace
+from certum.utils.math_utils import accept_margin_ratio
 
 logger = logging.getLogger(__name__)
 
@@ -76,23 +78,10 @@ class VerifiabilityGate:
         *,
         run_id: str,
         split: str = "pos",
-        neg_mode: Optional[str] = None,
-        claim_vec: Optional[np.ndarray] = None,
-        ev_vecs: Optional[np.ndarray] = None,
     ) -> EvaluationResult:
 
-        # --- Embedding (strict shape handling) ---
-
-        if claim_vec is None:
-            claim_vec_raw = self.embedder.embed([claim])
-            if claim_vec_raw.shape[0] != 1:
-                raise ValueError(
-                    f"Unexpected claim embedding shape: {claim_vec_raw.shape}"
-                )
-            claim_vec = claim_vec_raw[0]
-
-        if ev_vecs is None:
-            ev_vecs = self.embedder.embed(evidence_texts)
+        claim_vec = self.embedder.embed([claim])[0]
+        ev_vecs = self.embedder.embed(evidence_texts)
 
         # --- Energy computation ---
 
@@ -100,17 +89,18 @@ class VerifiabilityGate:
 
         # --- Build Decision Axes (explicit 3D surface) ---
 
-        axes = DecisionAxes(
-            energy=base.energy,
-            participation_ratio=base.geometry.participation_ratio,
-            sensitivity=base.geometry.sensitivity,
-            alignment=base.geometry.alignment_to_sigma1,
-            sim_margin=base.geometry.sim_margin,
-        )
+        axes = AxisBundle({
+            "energy": base.energy,
+            "participation_ratio": base.geometry.participation_ratio,
+            "sensitivity": base.geometry.sensitivity,
+            "alignment": base.geometry.alignment_to_sigma1,
+            "sim_margin": base.geometry.sim_margin,
+        })
+
 
         # --- Margin-based effectiveness (diagnostic only) ---
 
-        effectiveness = self._accept_margin_ratio(
+        effectiveness = accept_margin_ratio(
             energy=base.energy,
             tau=policy.tau_accept,
         )
@@ -120,12 +110,11 @@ class VerifiabilityGate:
         verdict = policy.decide(axes, effectiveness)
 
         logger.debug(
-            f"[Gate] E={axes.energy:.4f} "
-            f"PR={axes.participation_ratio:.4f} "
-            f"S={axes.sensitivity:.4f} "
+            "[Gate] "
+            f"E={axes.get('energy'):.4f} "
+            f"PR={axes.get('participation_ratio'):.4f} "
+            f"S={axes.get('sensitivity'):.4f} "
             f"| tauE={policy.tau_accept:.4f} "
-            f"tauPR={policy.pr_threshold:.4f} "
-            f"tauS={policy.sensitivity_threshold:.4f} "
             f"=> {verdict.value}"
         )
 
@@ -164,27 +153,5 @@ class VerifiabilityGate:
             verdict=verdict,
             policy_applied=policy.name,
             split=split,
-            neg_mode=neg_mode,
         )
 
-    # ---------------------------------------------------------
-    # Diagnostics
-    # ---------------------------------------------------------
-
-    @staticmethod
-    def policy_log_row(result: EvaluationResult) -> dict:
-        """
-        Minimal structured log row for analysis.
-        """
-        return {
-            "energy": result.energy_result.energy,
-            "verdict": result.verdict.value,
-            "policy": result.policy_applied,
-        }
-
-    @staticmethod
-    def _accept_margin_ratio(energy: float, tau: float) -> float:
-        """
-        Normalized margin relative to acceptance threshold.
-        """
-        return max(0.0, (tau - energy) / max(tau, 1e-6))

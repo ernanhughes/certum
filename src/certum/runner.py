@@ -28,7 +28,7 @@ import argparse
 logger = logging.getLogger(__name__)
 
 
-class GateSuiteRunner:
+class CertumRunner:
     """
     Certum Orchestration Layer.
 
@@ -291,7 +291,7 @@ def main():
 
     args = ap.parse_args()
 
-    runner = GateSuiteRunner()
+    runner = CertumRunner()
     runner.run(**vars(args))
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # scripts/run_certum.py
 
 import argparse
-from certum.runner import GateSuiteRunner
+from certum.runner import CertumRunner
 
 
 def main():
@@ -9,7 +9,7 @@ def main():
     # (same arguments as before)
     args = ap.parse_args()
 
-    runner = GateSuiteRunner()
+    runner = CertumRunner()
 
     runner.run(
         kind=args.kind,

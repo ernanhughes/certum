@@ -98,28 +98,6 @@ class EnergyResult:
         }
 
 
-@dataclass(frozen=True)
-class DecisionAxes:
-    """
-    Explicit 3D decision surface input.
-
-    These are policy-facing signals.
-    Not blended. Not mixed. Not interpreted.
-    """
-
-    # Axis 1
-    energy: float
-
-    # Axis 2
-    participation_ratio: float
-
-    # Axis 3
-    sensitivity: float
-
-    # Diagnostic-only (optional use)
-    alignment: float
-    sim_margin: float
-
 
 @dataclass(frozen=True)
 class EvaluationResult:
@@ -139,7 +117,6 @@ class EvaluationResult:
 
     embedding_info: Dict
 
-    neg_mode: Optional[str]
     robustness_probe: Optional[List[float]] = None  # Energy under param variations
     difficulty_value: Optional[float] = 0.0
     difficulty_bucket: Optional[str] = None
@@ -149,7 +126,6 @@ class EvaluationResult:
             "meta": {
                 "run_id": self.run_id,
                 "split": self.split,
-                "neg_mode": self.neg_mode,
                 "policy": self.policy_applied,
             },
             "claim": self.claim,
