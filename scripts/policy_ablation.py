@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score
 import numpy as np
 
-from dpgss.embedding.embedder import HFEmbedder
-from dpgss.embedding.sqlite_embedding_backend import SQLiteEmbeddingBackend
+from certum.embedding.embedder import HFEmbedder
+from certum.embedding.sqlite_embedding_backend import SQLiteEmbeddingBackend
 
 
 # -----------------------------

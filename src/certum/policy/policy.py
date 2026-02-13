@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 from dataclasses import dataclass
 
-from dpgss.custom_types import Verdict, DecisionAxes
+from certum.custom_types import Verdict, DecisionAxes
 
 
 class Policy(ABC):

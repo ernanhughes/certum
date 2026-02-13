@@ -1,5 +1,5 @@
 
-from dpgss.embedding.embedding_store import EmbeddingStore
+from certum.embedding.embedding_store import EmbeddingStore
 
 class SQLiteEmbeddingBackend:
     def __init__(self, db_path: str):

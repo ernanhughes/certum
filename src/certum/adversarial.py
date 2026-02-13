@@ -2,14 +2,18 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple, Dict, Any
 import random
 import numpy as np
+import logging
 
-# ---------------------------------------------------------------------
-# Base interface
-# ---------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# Base Interface
+# ============================================================
 
 class AdversarialPairGenerator(ABC):
     """
     Generates adversarial (claim, evidence) PAIRS.
+
     This is the ONLY valid way to generate hallucination negatives.
     """
 
@@ -30,19 +34,26 @@ class AdversarialPairGenerator(ABC):
         pass
 
 
-# ---------------------------------------------------------------------
-# Utilities (ported verbatim from gate_suite)
-# ---------------------------------------------------------------------
+# ============================================================
+# Utilities
+# ============================================================
 
 def _unit_norm(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32)
     n = np.linalg.norm(x)
     return x / max(n, eps)
 
+
 def _unit_norm_rows(X: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    X = np.asarray(X, dtype=np.float32)
     norms = np.linalg.norm(X, axis=1, keepdims=True)
     norms = np.where(norms < eps, 1.0, norms)
     return X / norms
 
+
+# ============================================================
+# Derangement Utility
+# ============================================================
 
 def derangement_indices(
     n: int,
@@ -51,6 +62,7 @@ def derangement_indices(
     method: str = "uniform",
     max_tries: int = 10_000,
 ) -> Tuple[List[int], Dict[str, Any]]:
+
     if n <= 1:
         return list(range(n)), {"fixed_points": n, "tries": 1, "method": method}
 
@@ -67,10 +79,8 @@ def derangement_indices(
         if all(i != p[i] for i in range(n)):
             return p, {"fixed_points": 0, "tries": t, "method": "uniform"}
 
-    p, meta = derangement_indices(n, rng, method="sattolo")
-    meta["method"] = "uniform->sattolo"
-    meta["tries"] = max_tries
-    return p, meta
+    logger.warning("Uniform derangement failed; falling back to Sattolo.")
+    return derangement_indices(n, rng, method="sattolo")
 
 
 def _neg_from(pairs: List[Dict[str, Any]], i: int, j: int) -> Dict[str, Any]:
@@ -79,70 +89,61 @@ def _neg_from(pairs: List[Dict[str, Any]], i: int, j: int) -> Dict[str, Any]:
         "id": pairs[i].get("id", i),
         "claim": pairs[i]["claim"],
         "evidence": src.get("evidence", []),
-        "evidence_vecs": src.get("evidence_vecs", None),
+        "evidence_vecs": src.get("evidence_vecs"),
         "label": "NEG",
     }
 
 
-# ---------------------------------------------------------------------
-# Pair generators
-# ---------------------------------------------------------------------
+# ============================================================
+# Generators
+# ============================================================
 
 class DerangedPairGenerator(AdversarialPairGenerator):
+
     @property
     def name(self) -> str:
         return "deranged"
 
-    def generate(
-        self,
-        pairs: List[Dict[str, Any]],
-        *,
-        seed: int,
-        embedder: Optional[Any] = None,
-        energy_computer: Optional[Any] = None,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def generate(self, pairs, *, seed, embedder=None, energy_computer=None):
         n = len(pairs)
-        if n <= 1:
-            # cannot derange, fallback to cyclic/offset/no-op
-            negs = [_neg_from(pairs, 0, 0)] if n == 1 else []
-            meta = {"mode": "deranged", "n": n, "fixed_points": n, "note": "degenerate"}
-            return negs, meta
         rng = random.Random(seed)
+
+        if n <= 1:
+            logger.warning("Degenerate derangement case.")
+            negs = [_neg_from(pairs, 0, 0)] if n == 1 else []
+            return negs, {"mode": "deranged", "n": n, "note": "degenerate"}
+
         perm, meta = derangement_indices(n, rng)
-
-        assert all(i != perm[i] for i in range(n)), "Derangement failed"
-
         negs = [_neg_from(pairs, i, perm[i]) for i in range(n)]
+
         meta.update({"mode": "deranged", "n": n})
         return negs, meta
 
 
+# ------------------------------------------------------------
+
 class CyclicPairGenerator(AdversarialPairGenerator):
+
     @property
     def name(self) -> str:
         return "cyclic"
 
-    def generate(
-        self,
-        pairs: List[Dict[str, Any]],
-        *,
-        seed: int,
-        embedder: Optional[Any] = None,
-        energy_computer: Optional[Any] = None,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def generate(self, pairs, *, seed, embedder=None, energy_computer=None):
         n = len(pairs)
+
         if n == 0:
-            return [], {"mode": "cyclic", "n": 0, "fixed_points": 0, "note": "empty"}
-        if n == 1:
-            negs = [_neg_from(pairs, 0, 0)]
-            return negs, {"mode": "cyclic", "n": 1, "fixed_points": 1, "note": "degenerate"}
+            return [], {"mode": "cyclic", "n": 0}
 
         perm = [(i + 1) % n for i in range(n)]
         negs = [_neg_from(pairs, i, perm[i]) for i in range(n)]
-        return negs, {"mode": "cyclic", "n": n, "fixed_points": 0}
 
+        return negs, {"mode": "cyclic", "n": n}
+
+
+# ------------------------------------------------------------
 
 class OffsetPairGenerator(AdversarialPairGenerator):
+
     def __init__(self, offset: int = 1):
         self.offset = offset
 
@@ -150,248 +151,244 @@ class OffsetPairGenerator(AdversarialPairGenerator):
     def name(self) -> str:
         return f"offset_{self.offset}"
 
-    def generate(
-        self,
-        pairs: List[Dict[str, Any]],
-        *,
-        seed: int,
-        embedder: Optional[Any] = None,
-        energy_computer: Optional[Any] = None,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def generate(self, pairs, *, seed, embedder=None, energy_computer=None):
         n = len(pairs)
+
         if n == 0:
-            return [], {"mode": "offset", "n": 0, "requested_offset": self.offset, "effective_offset": 0, "fixed_points": 0, "note": "empty"}
+            return [], {"mode": "offset", "n": 0}
 
         off = self.offset % n
-        adjusted = False
         if n > 1 and off == 0:
             off = 1
-            adjusted = True
 
         perm = [(i + off) % n for i in range(n)]
-        fixed = sum(1 for i in range(n) if perm[i] == i)
         negs = [_neg_from(pairs, i, perm[i]) for i in range(n)]
-        meta = {
+
+        return negs, {
             "mode": "offset",
             "n": n,
-            "requested_offset": self.offset,
             "effective_offset": off,
-            "fixed_points": fixed,
         }
-        if adjusted:
-            meta["note"] = "offset% n == 0 adjusted to 1"
-        return negs, meta
 
+
+# ------------------------------------------------------------
 
 class PermutePairGenerator(AdversarialPairGenerator):
+
     @property
     def name(self) -> str:
         return "permute"
 
-    def generate(
-        self,
-        pairs: List[Dict[str, Any]],
-        *,
-        seed: int,
-        embedder: Optional[Any] = None,
-        energy_computer: Optional[Any] = None,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def generate(self, pairs, *, seed, embedder=None, energy_computer=None):
         n = len(pairs)
         rng = random.Random(seed)
+
         perm = list(range(n))
         rng.shuffle(perm)
-        fixed = sum(1 for i in range(n) if perm[i] == i)
-        negs = [_neg_from(pairs, i, perm[i]) for i in range(n)]
-        return negs, {"mode": "permute", "n": n, "fixed_points": fixed}
 
+        negs = [_neg_from(pairs, i, perm[i]) for i in range(n)]
+        fixed = sum(1 for i in range(n) if perm[i] == i)
+
+        return negs, {
+            "mode": "permute",
+            "n": n,
+            "fixed_points": fixed,
+        }
+
+
+# ------------------------------------------------------------
+# Hard Mined (Centroid Similarity)
+# ------------------------------------------------------------
 
 class HardMinedPairGenerator(AdversarialPairGenerator):
+
     @property
     def name(self) -> str:
         return "hard_mined"
 
-    def generate(
-        self,
-        pairs: List[Dict[str, Any]],
-        *,
-        seed: int,
-        embedder: Optional[Any] = None,
-        energy_computer: Optional[Any] = None,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def generate(self, pairs, *, seed, embedder=None, energy_computer=None):
+
         if embedder is None:
             raise ValueError("hard_mined requires embedder")
 
-        valid = []
+        logger.debug("Running hard_mined negative generation.")
+
+        valid_indices = []
         centroids = []
 
-        for idx, ex in enumerate(pairs):
-            ev = ex.get("evidence_vecs")
+        for i, p in enumerate(pairs):
+            ev = p.get("evidence_vecs")
             if ev is None:
                 continue
+
             ev = np.asarray(ev, dtype=np.float32)
             if ev.ndim != 2 or ev.shape[0] == 0:
                 continue
-            c = _unit_norm(_unit_norm_rows(ev).mean(axis=0))
-            if np.isfinite(c).all():
-                valid.append(idx)
-                centroids.append(c)
 
-        if len(valid) < 2:
-            # fallback
+            ev_norm = _unit_norm_rows(ev)
+            centroid = _unit_norm(ev_norm.mean(axis=0))
+
+            if np.isfinite(centroid).all():
+                valid_indices.append(i)
+                centroids.append(centroid)
+
+        if len(valid_indices) < 2:
+            logger.warning("Insufficient valid evidence for hard_mined.")
             return DerangedPairGenerator().generate(pairs, seed=seed)
 
-        claim_vecs = embedder.embed([ex["claim"] for ex in pairs])
-        claim_vecs = _unit_norm_rows(np.asarray(claim_vecs, dtype=np.float32))
-        centroid_mat = _unit_norm_rows(np.stack(centroids))
+        claim_vecs = _unit_norm_rows(
+            np.asarray(embedder.embed([p["claim"] for p in pairs]), dtype=np.float32)
+        )
 
+        centroid_mat = _unit_norm_rows(np.stack(centroids))
         sim = claim_vecs @ centroid_mat.T
 
-        vpos = {orig: pos for pos, orig in enumerate(valid)}
+        vpos = {orig: pos for pos, orig in enumerate(valid_indices)}
         for i, pos in vpos.items():
             sim[i, pos] = -np.inf
 
         best = np.argmax(sim, axis=1)
-        best_j = [valid[int(p)] for p in best]
+        best_j = [valid_indices[int(p)] for p in best]
 
         negs = [_neg_from(pairs, i, best_j[i]) for i in range(len(pairs))]
-        meta = {
+
+        return negs, {
             "mode": "hard_mined",
             "n": len(pairs),
-            "candidates": len(valid),
-            "method": "argmax cosine(claim, evidence_centroid)",
+            "candidates": len(valid_indices),
         }
-        return negs, meta
+
+
+# ------------------------------------------------------------
+# Hard Mined V2 (Energy-Minimizing)
+# ------------------------------------------------------------
 
 class HardMinedPairGeneratorV2(AdversarialPairGenerator):
-    """Hard negatives that MINIMIZE hallucination energy (true adversarial for your metric)."""
-    
+
     def __init__(self, top_candidates: int = 16):
         self.top_candidates = top_candidates
-    
+
     @property
     def name(self) -> str:
         return "hard_mined_v2"
-    
-    def generate(
-        self,
-        pairs: List[Dict[str, Any]],
-        *,
-        seed: int,
-        embedder: Optional[Any] = None,
-        energy_computer: Optional[Any] = None,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+
+    def generate(self, pairs, *, seed, embedder=None, energy_computer=None):
+
         if embedder is None or energy_computer is None:
             raise ValueError("hard_mined_v2 requires embedder and energy_computer")
-        
+
+        logger.debug("Running hard_mined_v2 adversarial search.")
+
         n = len(pairs)
         if n < 2:
-            return [], {"mode": "hard_mined_v2", "n": n, "error": "insufficient_samples"}
-        
-        # Precompute claim vectors + evidence centroids
-        claim_vecs = _unit_norm_rows(np.asarray(embedder.embed([p["claim"] for p in pairs]), dtype=np.float32))
-        centroids = []
-        ev_vecs_list = []
+            return [], {"mode": "hard_mined_v2", "n": n}
+
+        claim_vecs = _unit_norm_rows(
+            np.asarray(embedder.embed([p["claim"] for p in pairs]), dtype=np.float32)
+        )
+
         valid_indices = []
-        
+        ev_vecs_list = []
+        centroids = []
+
         for i, p in enumerate(pairs):
             ev = p.get("evidence_vecs")
-            if ev is None or len(ev) == 0:
+            if ev is None:
                 continue
-            ev_arr = np.asarray(ev, dtype=np.float32)
-            if ev_arr.ndim != 2:
+
+            ev = np.asarray(ev, dtype=np.float32)
+            if ev.ndim != 2 or ev.shape[0] == 0:
                 continue
-            ev_norm = _unit_norm_rows(ev_arr)
+
+            ev_norm = _unit_norm_rows(ev)
             centroid = _unit_norm(ev_norm.mean(axis=0))
+
             if np.isfinite(centroid).all():
-                centroids.append(centroid)
-                ev_vecs_list.append(ev_norm)
                 valid_indices.append(i)
-        
+                ev_vecs_list.append(ev_norm)
+                centroids.append(centroid)
+
         if len(valid_indices) < 2:
-            # Fallback to deranged if insufficient valid evidence
+            logger.warning("Fallback to deranged from hard_mined_v2.")
             return DerangedPairGenerator().generate(pairs, seed=seed)
-        
-        centroid_mat = _unit_norm_rows(np.stack(centroids))  # (m, d)
-        sim = claim_vecs @ centroid_mat.T  # (n, m)
-        
+
+        centroid_mat = _unit_norm_rows(np.stack(centroids))
+        sim = claim_vecs @ centroid_mat.T
+
+        K = min(self.top_candidates, len(valid_indices))
         rng = np.random.default_rng(seed)
+
         chosen_js = []
         chosen_energies = []
-        
-        K = min(self.top_candidates, len(valid_indices))
-        
+
         for i in range(n):
-            # Shortlist top-K candidates by centroid similarity
+
             idx = np.argpartition(-sim[i], K - 1)[:K]
-            
-            # Find candidate with MINIMUM energy (true adversarial)
+
             best_j = None
             best_e = float("inf")
-            
+
             for cand_pos in idx:
                 j_idx = valid_indices[int(cand_pos)]
-                if j_idx == i:  # Skip self
+                if j_idx == i:
                     continue
-                
-                # Compute actual energy with mismatched evidence
+
                 e = energy_computer.compute(
-                    claim_vecs[i], 
+                    claim_vecs[i],
                     ev_vecs_list[valid_indices.index(j_idx)]
                 ).energy
-                
+
                 if e < best_e:
                     best_e = e
                     best_j = j_idx
-            
-            # Fallback if no candidate found (rare)
+
             if best_j is None:
                 best_j = valid_indices[int(rng.integers(0, len(valid_indices)))]
                 best_e = 1.0
-            
+
             chosen_js.append(best_j)
             chosen_energies.append(best_e)
-        
-        # Construct negative pairs
-        negs = []
-        for i in range(n):
-            src = pairs[chosen_js[i]]
-            negs.append({
+
+        negs = [
+            {
                 "id": pairs[i].get("id", i),
                 "claim": pairs[i]["claim"],
-                "evidence": src.get("evidence", []),
-                "evidence_texts": src.get("evidence_texts", []),
-                "evidence_vecs": src.get("evidence_vecs"),  # Critical: reuse vectors
+                "evidence": pairs[chosen_js[i]].get("evidence", []),
+                "evidence_vecs": pairs[chosen_js[i]].get("evidence_vecs"),
                 "label": "NEG_HARD_V2",
-            })
-        
-        meta = {
+            }
+            for i in range(n)
+        ]
+
+        return negs, {
             "mode": "hard_mined_v2",
             "n": n,
-            "candidates": len(valid_indices),
-            "top_candidates": K,
             "mean_energy": float(np.mean(chosen_energies)),
             "min_energy": float(np.min(chosen_energies)),
             "max_energy": float(np.max(chosen_energies)),
         }
-        return negs, meta
-    
-def get_adversarial_generator(mode: str, **kwargs) -> AdversarialPairGenerator:
-    off = kwargs.get("neg_offset", 37)
-    off = 37 if off is None else int(off) # Ensure offset is an integer for generators that require it
 
-    """Factory for negative calibration modes."""
+
+# ============================================================
+# Factory
+# ============================================================
+
+def get_adversarial_generator(mode: str, **kwargs) -> AdversarialPairGenerator:
+
+    off = kwargs.get("neg_offset", 37)
+    off = 37 if off is None else int(off)
+
     if mode == "deranged":
         return DerangedPairGenerator()
-    elif mode == "offset":
+    if mode == "offset":
         return OffsetPairGenerator(offset=off)
-    elif mode == "cyclic":
+    if mode == "cyclic":
         return CyclicPairGenerator()
-    elif mode == "permute":
+    if mode == "permute":
         return PermutePairGenerator()
-    elif mode == "hard_mined":
+    if mode == "hard_mined":
         return HardMinedPairGenerator()
-    elif mode == "hard_mined_v2":
+    if mode == "hard_mined_v2":
         return HardMinedPairGeneratorV2()
-    else:
-        raise ValueError(f"Unknown neg_mode: {mode}")
 
+    raise ValueError(f"Unknown neg_mode: {mode}")

@@ -2,9 +2,9 @@ from typing import List
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from dpgss.protocols.embedding_backend import EmbeddingBackend
+from certum.protocols.embedding_backend import EmbeddingBackend
 
-# dpgss/embedding/hf_embedder.py
+# certum/embedding/hf_embedder.py
 
 
 

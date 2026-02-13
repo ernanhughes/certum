@@ -1,4 +1,4 @@
-# dpgss/protocols/evidence_store.py
+# certum/protocols/evidence_store.py
 
 from typing import Protocol, List, Tuple
 import numpy as np

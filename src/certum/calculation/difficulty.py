@@ -1,7 +1,7 @@
 import numpy as np
 from dataclasses import dataclass
 
-# src/dpgss/difficulty/difficulty_score.py
+# src/certum/difficulty/difficulty_score.py
 
 from dataclasses import dataclass
 import numpy as np

@@ -1,8 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
-from dpgss.custom_types import EvaluationResult
-from dpgss.difficulty.difficulty_metrics import DifficultyMetrics
+from certum.custom_types import EvaluationResult
+from certum.difficulty.difficulty_metrics import DifficultyMetrics
 
 @dataclass(frozen=True)
 class DifficultyRanges:

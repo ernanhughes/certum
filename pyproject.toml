@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "verity-gate"
+name = "certum"
 version = "0.1.0"
 description = "Deterministic Policy Gates for Stochastic Systems"
 readme = "README.md"

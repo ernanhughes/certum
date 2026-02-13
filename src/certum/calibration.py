@@ -1,12 +1,12 @@
-# src/dpgss/calibration.py
+# src/certum/calibration.py
 from typing import List, Tuple, Dict, Any, Optional
 import random
 import numpy as np
 import logging
 
-from dpgss.energy import HallucinationEnergyComputer
-from dpgss.protocols.embedder import Embedder
-from dpgss.gate import VerifiabilityGate
+from certum.energy import HallucinationEnergyComputer
+from certum.protocols.embedder import Embedder
+from certum.gate import VerifiabilityGate
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ class AdaptiveCalibrator:
         evidence_sets: List[List[str]],
         evidence_vecs: List[np.ndarray],
         claim_vec_cache: Dict[str, np.ndarray],
+        pos_coverage: float = 95.0,
         percentiles: List[int] = [1, 5, 10, 20, 30],
         neg_mode: str = "deranged",
         neg_offset: int = 37,
@@ -51,14 +52,6 @@ class AdaptiveCalibrator:
             pos_sensitivity_values.append(res.geometry.sensitivity)
             pos_energies.append(energy)
         
-
-        tau_pr = float(np.percentile(pos_pr_values, 90))
-        tau_sensitivity = float(np.percentile(pos_sensitivity_values, 90))
-
-        tau_pr_by_percentile = {
-            p: float(np.percentile(pos_pr_values, 100 - p))
-            for p in percentiles
-        }
 
         # 2. Compute NEGATIVE energies (easy baseline: deranged)
         neg_energies_deranged = self._compute_neg_energies(
@@ -87,6 +80,34 @@ class AdaptiveCalibrator:
                 "Insufficient negative samples for hard-negative gap calibration."
             )
         
+
+        # Condition on energy passing threshold
+        tau_energy = float(np.percentile(neg_energies_hard, percentiles[0]))
+
+        mask = np.array(pos_energies) <= tau_energy
+
+        pos_pr_cond = np.array(pos_pr_values)[mask]
+        pos_sens_cond = np.array(pos_sensitivity_values)[mask]
+
+        if len(pos_pr_cond) < 10:
+            logger.warning("Too few positives under energy threshold for PR calibration.")
+            pos_pr_cond = np.array(pos_pr_values)
+            pos_sens_cond = np.array(pos_sensitivity_values)
+
+        tau_pr = float(np.percentile(pos_pr_cond, 90))
+        tau_sensitivity = float(np.percentile(pos_sens_cond, 90))
+
+        logger.info(
+            f"[Calibration] PR τ @ {pos_coverage}% = {tau_pr:.4f}, "
+            f"Sensitivity τ @ {pos_coverage}% = {tau_sensitivity:.4f}"
+        )
+
+
+        tau_pr_by_percentile = {
+            p: float(np.percentile(pos_pr_values, 100 - p))
+            for p in percentiles
+        }
+
         hard_negative_gap = self._compute_hard_negative_gap(
             neg_energies_deranged,
             neg_energies_hard,
@@ -129,7 +150,27 @@ class AdaptiveCalibrator:
             "neg_mode": neg_mode,
             "hard_negative_gap": hard_negative_gap,
             "hard_negative_gap_norm": hard_negative_gap_norm,
+            "pos_pr_values": pos_pr_values,
+            "pos_sensitivity_values": pos_sensitivity_values,
         }    
+
+    def compute_effectiveness_curve(d_values, accepted_flags, bins=10):
+        d_values = np.array(d_values)
+        accepted_flags = np.array(accepted_flags)
+
+        edges = np.linspace(0, 1, bins + 1)
+        results = []
+
+        for i in range(bins):
+            mask = (d_values >= edges[i]) & (d_values < edges[i+1])
+            if mask.sum() == 0:
+                continue
+
+            acc_rate = accepted_flags[mask].mean()
+            results.append((0.5*(edges[i]+edges[i+1]), acc_rate))
+
+        return results
+
 
     def _generate_negatives(
         self,

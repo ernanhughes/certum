@@ -26,7 +26,7 @@ function Run-One($MODE, $EXTRA_ARGS) {
   $neg    = "$OUTDIR\neg_$MODE.jsonl"
   $plot   = "$OUTDIR\$MODE.png"
 
-  py scripts\run_gate_suite.py `
+  py -m certum.runner `
     --kind feverous `
     --in_path $DATA `
     --cache_db $CACHEDB `

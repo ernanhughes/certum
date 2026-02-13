@@ -12,7 +12,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import numpy as np
 from tqdm import tqdm
@@ -294,7 +294,7 @@ def print_report(report: Dict[str, Any], out_path: Path):
         lines.append(f"\n{pat.replace('_', ' ').title()}")
         lines.append(f"  Occurrence:  {stats['count']} ({stats['percent']:.1f}%)")
         lines.append(f"  Mean energy: {stats['mean_energy']:.3f}")
-        lines.append(f"  Examples:")
+        lines.append("  Examples:")
         for ex in stats["examples"][:2]:
             claim = ex["claim"][:100] + "..." if len(ex["claim"]) > 100 else ex["claim"]
             ev = ex["evidence_sample"][:80] + "..." if len(ex["evidence_sample"]) > 80 else ex["evidence_sample"]

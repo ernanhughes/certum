@@ -426,7 +426,7 @@ class Embedder:
         self._impl = None
         try:
             # If your project has this
-            from dpgss.embedding.embedder import HFEmbedder  # type: ignore
+            from certum.embedding.embedder import HFEmbedder  # type: ignore
             self._impl = HFEmbedder(model_name=model_name, embedding_db="E:\\data\\global_embeddings.db")
         except Exception:
             try:

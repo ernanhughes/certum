@@ -1,4 +1,4 @@
-# src/dpgss/dataset.py
+# src/certum/dataset.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,7 +6,7 @@ from typing import Iterable, List, Tuple, Dict, Any, Iterator, Optional
 import json
 import random
 
-from dpgss.protocols.evidence_store import EvidenceStore
+from certum.protocols.evidence_store import EvidenceStore
 
 
 def load_examples(

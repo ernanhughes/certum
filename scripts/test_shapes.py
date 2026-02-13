@@ -1,5 +1,5 @@
-from dpgss.embedding.embedder import HFEmbedder
-from dpgss.energy import HallucinationEnergyComputer
+from certum.embedding.embedder import HFEmbedder
+from certum.energy import HallucinationEnergyComputer
 import numpy as np
 
 embedder = HFEmbedder()

@@ -2,8 +2,8 @@ from pathlib import Path
 from typing import List, Tuple, Dict
 import sqlite3
 
-from dpgss.protocols.evidence_store import EvidenceStore
-from dpgss.utils.text_utils import clean_wiki_markup
+from certum.protocols.evidence_store import EvidenceStore
+from certum.utils.text_utils import clean_wiki_markup
 
 class SQLiteEvidenceStore(EvidenceStore):
     """

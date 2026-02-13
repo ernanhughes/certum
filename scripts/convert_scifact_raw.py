@@ -28,7 +28,7 @@ def convert_scifact(
     out_path: Path | None = None,
 ):
     """
-    Convert raw SciFact files into DPGSS-ready JSONL format.
+    Convert raw SciFact files into certum-ready JSONL format.
 
     dataset_dir should contain:
         corpus.jsonl

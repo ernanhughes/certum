@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import List
 
-from dpgss.policy.decision_trace import DecisionTrace
+from certum.policy.decision_trace import DecisionTrace
 
 
 @dataclass(frozen=True)

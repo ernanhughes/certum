@@ -1,4 +1,4 @@
-# dpgss/protocols/embedding_backend.py
+# certum/protocols/embedding_backend.py
 
 from typing import Protocol, List, Tuple
 import numpy as np

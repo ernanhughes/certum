@@ -3,7 +3,7 @@ from enum import Enum
 from typing import List, Optional, Dict, Any
 import numpy as np
 
-from dpgss.policy.decision_trace import DecisionTrace
+from certum.policy.decision_trace import DecisionTrace
 
 
 class Verdict(Enum):

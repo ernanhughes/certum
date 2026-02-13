@@ -1,4 +1,4 @@
-# dpgss/protocols/embedder.py
+# certum/protocols/embedder.py
 
 from typing import Protocol, List
 import numpy as np

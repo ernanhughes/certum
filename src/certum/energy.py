@@ -188,7 +188,7 @@ class HallucinationEnergyComputer:
                 res = computer.compute(claim_vec, evidence_vecs)
                 probes.append(res.energy)
             except Exception as e:
-                logger.exception("Robustness probe failed.")
+                logger.exception("Robustness probe failed: %s", str(e))
                 probes.append(1.0)
 
         return probes
