@@ -6,7 +6,7 @@ import logging
 
 from certum.custom_types import EnergyResult, EvaluationResult
 from certum.axes.bundle import AxisBundle
-from certum.energy import HallucinationEnergyComputer
+from certum.geometry.claim_evidence import ClaimEvidenceGeometry
 from certum.protocols.embedder import Embedder
 from certum.protocols.policy import Policy
 from certum.policy.decision_trace import DecisionTrace
@@ -31,7 +31,7 @@ class VerifiabilityGate:
     def __init__(
         self,
         embedder: Embedder,
-        energy_computer: HallucinationEnergyComputer,
+        energy_computer: ClaimEvidenceGeometry,
     ):
         self.embedder = embedder
         self.energy_computer = energy_computer

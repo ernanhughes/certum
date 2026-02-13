@@ -23,11 +23,11 @@ from tqdm import tqdm
 
 from certum.gate import VerifiabilityGate
 from certum.policy.policy import AdaptivePolicy
-from certum.energy import HallucinationEnergyComputer
-from certum.embedding.embedder import HFEmbedder
+from certum.geometry.claim_evidence import ClaimEvidenceGeometry
+from certum.embedding.hf_embedder import HFEmbedder
 from certum.embedding.sqlite_embedding_backend import SQLiteEmbeddingBackend
 from certum.evidence.sqlite_evidence_store import SQLiteEvidenceStore
-from certum.dataset import load_examples
+from certum.dataset.loader import load_examples
 from certum.adversarial import get_adversarial_generator
 
 
@@ -168,7 +168,7 @@ def main():
 
     backend = SQLiteEmbeddingBackend(str(args.embedding_db))
     embedder = HFEmbedder(model_name=args.model, backend=backend)
-    energy_computer = HallucinationEnergyComputer(top_k=12, rank_r=8)
+    energy_computer = ClaimEvidenceGeometry(top_k=12, rank_r=8)
 
     gate = VerifiabilityGate(embedder, energy_computer)
 

@@ -4,7 +4,7 @@ import random
 import numpy as np
 import logging
 
-from certum.energy import HallucinationEnergyComputer
+from certum.geometry.claim_evidence import ClaimEvidenceGeometry
 from certum.protocols.embedder import Embedder
 from certum.gate import VerifiabilityGate
 
@@ -180,7 +180,7 @@ class AdaptiveCalibrator:
         mode: str = "deranged",
         offset: int = 37,
         seed: int = 1337,
-        energy_computer: Optional[HallucinationEnergyComputer] = None,  # ← NEW
+        energy_computer: Optional[ClaimEvidenceGeometry] = None,  # ← NEW
     ) -> List[Tuple[str, List[str], np.ndarray]]:  # ← Returns (claim, evidence_texts, evidence_vecs)
         """
         Generate adversarial negative samples.
@@ -441,7 +441,7 @@ class AdaptiveCalibrator:
 def compute_energy_from_vectors(
     claim_vec: np.ndarray,
     evidence_vecs: np.ndarray,
-    energy_computer: HallucinationEnergyComputer,
+    energy_computer: ClaimEvidenceGeometry,
 ) -> float:
     res = energy_computer.compute(
         claim_vec=claim_vec,
