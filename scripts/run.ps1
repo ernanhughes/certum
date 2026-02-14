@@ -19,6 +19,7 @@ $GLOBAL = @{
     CALFRAC   = "0.5"
     N         = "10000"
     SEED      = "1337"
+    GAP_WIDTH = "0.3"
 }
 
 # ============================================================
@@ -88,10 +89,24 @@ New-Item -ItemType Directory -Force -Path $OUTDIR | Out-Null
 # Adversarial Modes
 # ============================================================
 
+$POLICIES = @(
+    "energy_only",
+    "axis_only",
+    "pr_only",
+    "sensitivity_only",
+    "axis_first",
+    "monotone_adaptive"
+)
+
 $NEG_MODES = @(
+    # "offset",
+    # "cyclic",
+    # "permute",
+    # "hardest_energy_mined",
     "deranged",
     "hard_mined_v2"
 )
+
 
 # ============================================================
 # Write Metadata File
@@ -121,6 +136,7 @@ $meta = @{
         regime = $GLOBAL.REGIME
         far = [double]$GLOBAL.FAR
         cal_frac = [double]$GLOBAL.CALFRAC
+        gap_width = [double]$GLOBAL.GAP_WIDTH
     }
 
     random = @{
@@ -141,6 +157,8 @@ function Run-One($MODE) {
     $report = "$OUTDIR\negcal_$MODE.json"
     $pos    = "$OUTDIR\pos_$MODE.jsonl"
     $neg    = "$OUTDIR\neg_$MODE.jsonl"
+    $posPol = "$OUTDIR\pos_$MODE.policies.jsonl"
+    $negPol = "$OUTDIR\neg_$MODE.policies.jsonl"
     $plot   = "$OUTDIR\$MODE.png"
 
     py -m certum.orchestration.runner `
@@ -149,6 +167,9 @@ function Run-One($MODE) {
         --cache_db $CFG.cache_db `
         --embedding_db $GLOBAL.EMBEDDB `
         --model $GLOBAL.MODEL `
+        --policies ($POLICIES -join ",") `
+        --out_pos_policies $posPol `
+        --out_neg_policies $negPol `
         --regime $GLOBAL.REGIME `
         --far $GLOBAL.FAR `
         --cal_frac $GLOBAL.CALFRAC `
@@ -158,7 +179,8 @@ function Run-One($MODE) {
         --out_report $report `
         --out_pos_scored $pos `
         --out_neg_scored $neg `
-        --plot_png $plot
+        --plot_png $plot `
+        --gap_width $GLOBAL.GAP_WIDTH 
 }
 
 # ============================================================

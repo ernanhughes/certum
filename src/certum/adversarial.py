@@ -90,6 +90,7 @@ def _neg_from(pairs: List[Dict[str, Any]], i: int, j: int) -> Dict[str, Any]:
         "id": pairs[i].get("id", i),
         "claim": pairs[i]["claim"],
         "evidence": src.get("evidence", []),
+        "evidence_ids": src.get("evidence_ids"),
         "evidence_vecs": src.get("evidence_vecs"),
         "label": "NEG",
     }
@@ -184,18 +185,13 @@ class PermutePairGenerator(AdversarialPairGenerator):
         n = len(pairs)
         rng = random.Random(seed)
 
-        perm = list(range(n))
-        rng.shuffle(perm)
+        # IMPORTANT: for "NEG" generation we must avoid fixed points,
+        # otherwise some "NEG" pairs are actually supported positives.
+        perm, meta = derangement_indices(n, rng)
 
         negs = [_neg_from(pairs, i, perm[i]) for i in range(n)]
-        fixed = sum(1 for i in range(n) if perm[i] == i)
-
-        return negs, {
-            "mode": "permute",
-            "n": n,
-            "fixed_points": fixed,
-        }
-
+        meta.update({"mode": "permute", "n": n})
+        return negs, meta
 
 # ------------------------------------------------------------
 # Hard Mined (Centroid Similarity)
@@ -264,33 +260,81 @@ class HardMinedPairGenerator(AdversarialPairGenerator):
 # Hard Mined V2 (Energy-Minimizing)
 # ------------------------------------------------------------
 
-class HardMinedPairGeneratorV2(AdversarialPairGenerator):
 
-    def __init__(self, top_candidates: int = 16):
+# --- helpers ---------------------------------------------------------------
+
+def _page_from_element_id(eid: str) -> str:
+    """Best-effort FEVEROUS element-id → page key.
+    Works for *_sentence_*, *_cell_*, *_section_*, *_table_*, *_list_* and *_title.
+    """
+    s = str(eid)
+    for key in ("_sentence_", "_cell_", "_section_", "_table_", "_list_"):
+        if key in s:
+            return s.split(key, 1)[0]
+    # context ids like Page_title (no trailing underscore)
+    if s.endswith("_title"):
+        return s[: -len("_title")]
+    # fallback: avoid splitting page titles that contain underscores too aggressively
+    # take everything up to the last two underscores as "page-ish"
+    parts = s.split("_")
+    return "_".join(parts[:-2]) if len(parts) > 2 else s
+
+def _pages_from_ids(evidence_ids: Optional[List[str]]) -> set:
+    if not evidence_ids:
+        return set()
+    return {_page_from_element_id(eid) for eid in evidence_ids if isinstance(eid, str) and eid}
+
+def _ids_set(evidence_ids: Optional[List[str]]) -> set:
+    if not evidence_ids:
+        return set()
+    return {str(eid) for eid in evidence_ids if isinstance(eid, str) and eid}
+
+# --- generator -------------------------------------------------------------
+
+class HardMinedPairGeneratorV2(AdversarialPairGenerator):
+    """
+    Two modes:
+      - rerank_by_energy=False => "hard_mined_v2"  (similarity-only hard negatives)
+      - rerank_by_energy=True  => "hardest_energy_mined" (adaptive adversary vs energy)
+    """
+
+    def __init__(
+        self,
+        top_candidates: int = 16,
+        *,
+        rerank_by_energy: bool = False,
+        require_page_mismatch: bool = True,
+        require_disjoint_ids: bool = True,
+    ):
         self.top_candidates = top_candidates
+        self.rerank_by_energy = rerank_by_energy
+        self.require_page_mismatch = require_page_mismatch
+        self.require_disjoint_ids = require_disjoint_ids
 
     @property
     def name(self) -> str:
-        return "hard_mined_v2"
+        return "hardest_energy_mined" if self.rerank_by_energy else "hard_mined_v2"
 
     def generate(self, pairs, *, seed, embedder=None, energy_computer=None):
-
         if embedder is None or energy_computer is None:
             raise ValueError("hard_mined_v2 requires embedder and energy_computer")
 
-        logger.debug("Running hard_mined_v2 adversarial search.")
+        logger.debug("Running %s adversarial search.", self.name)
 
         n = len(pairs)
         if n < 2:
-            return [], {"mode": "hard_mined_v2", "n": n}
+            return [], {"mode": self.name, "n": n}
 
+        # Embed claims (unit norm)
         claim_vecs = _unit_norm_rows(
             np.asarray(embedder.embed([p["claim"] for p in pairs]), dtype=np.float32)
         )
 
-        valid_indices = []
-        ev_vecs_list = []
-        centroids = []
+        # Build candidate pool from examples with evidence_vecs
+        valid_indices: List[int] = []
+        centroids: List[np.ndarray] = []
+        ev_pages: List[set] = []
+        ev_ids: List[set] = []
 
         for i, p in enumerate(pairs):
             ev = p.get("evidence_vecs")
@@ -301,51 +345,100 @@ class HardMinedPairGeneratorV2(AdversarialPairGenerator):
             if ev.ndim != 2 or ev.shape[0] == 0:
                 continue
 
+            # centroid for similarity search only (normalize evidence rows first)
             ev_norm = _unit_norm_rows(ev)
-            centroid = _unit_norm(ev_norm.mean(axis=0))
+            c = _unit_norm(ev_norm.mean(axis=0))
+            if not np.isfinite(c).all():
+                continue
 
-            if np.isfinite(centroid).all():
-                valid_indices.append(i)
-                ev_vecs_list.append(ev_norm)
-                centroids.append(centroid)
+            valid_indices.append(i)
+            centroids.append(c)
+
+            # leakage guards (best effort)
+            ev_pages.append(_pages_from_ids(p.get("evidence_ids")))
+            ev_ids.append(_ids_set(p.get("evidence_ids")))
 
         if len(valid_indices) < 2:
-            logger.warning("Fallback to deranged from hard_mined_v2.")
+            logger.warning("Fallback to deranged from %s (insufficient valid evidence_vecs).", self.name)
             return DerangedPairGenerator().generate(pairs, seed=seed)
 
-        centroid_mat = _unit_norm_rows(np.stack(centroids))
-        sim = claim_vecs @ centroid_mat.T
+        centroid_mat = _unit_norm_rows(np.stack(centroids, axis=0))
+        sim = claim_vecs @ centroid_mat.T  # (n, m)
 
         K = min(self.top_candidates, len(valid_indices))
         rng = np.random.default_rng(seed)
 
-        chosen_js = []
-        chosen_energies = []
+        chosen_js: List[int] = []
+        chosen_energies: List[float] = []
+
+        # Precompute claim-side pages/ids if present (for stronger mismatch checks)
+        claim_pages = [_pages_from_ids(p.get("evidence_ids")) for p in pairs]
+        claim_ids = [_ids_set(p.get("evidence_ids")) for p in pairs]
 
         for i in range(n):
+            # Top-K centroid-similar candidate positions (in [0..m))
+            topk_pos = np.argpartition(-sim[i], K - 1)[:K]
+            # Sort those K by similarity descending for deterministic selection
+            topk_pos = topk_pos[np.argsort(-sim[i, topk_pos])]
 
-            idx = np.argpartition(-sim[i], K - 1)[:K]
+            best_j: Optional[int] = None
+            best_e: float = float("inf")
 
-            best_j = None
-            best_e = float("inf")
+            # Try strict filters first; if nothing found, relax deterministically.
+            # Relax order: drop page mismatch, then drop id disjointness, then random fallback.
+            relax_steps = [
+                (self.require_page_mismatch, self.require_disjoint_ids),
+                (False, self.require_disjoint_ids),
+                (False, False),
+            ]
 
-            for cand_pos in idx:
-                j_idx = valid_indices[int(cand_pos)]
-                if j_idx == i:
-                    continue
+            for req_page_mismatch, req_disjoint_ids in relax_steps:
+                for cand_pos in topk_pos:
+                    j_idx = valid_indices[int(cand_pos)]
+                    if j_idx == i:
+                        continue
 
-                e = energy_computer.compute(
-                    claim_vecs[i],
-                    ev_vecs_list[valid_indices.index(j_idx)]
-                ).energy
+                    if req_page_mismatch:
+                        cp = claim_pages[i]
+                        jp = ev_pages[int(cand_pos)]
+                        if cp and jp and (cp & jp):
+                            continue
 
-                if e < best_e:
-                    best_e = e
-                    best_j = j_idx
+                    if req_disjoint_ids:
+                        ci = claim_ids[i]
+                        ji = ev_ids[int(cand_pos)]
+                        if ci and ji and not ci.isdisjoint(ji):
+                            continue
+
+                    if self.rerank_by_energy:
+                        # Adaptive: choose lowest-energy among filtered candidates
+                        ev_vecs = pairs[j_idx].get("evidence_vecs")
+                        if ev_vecs is None:
+                            continue
+                        e = float(energy_computer.compute(claim_vecs[i], np.asarray(ev_vecs, dtype=np.float32)).energy)
+                        if e < best_e:
+                            best_e = e
+                            best_j = j_idx
+                    else:
+                        # Non-adaptive: choose the first (highest similarity) candidate that passes filters
+                        best_j = j_idx
+                        best_e = float(energy_computer.compute(
+                            claim_vecs[i],
+                            np.asarray(pairs[j_idx].get("evidence_vecs"), dtype=np.float32),
+                        ).energy)
+                        break
+
+                if best_j is not None:
+                    break
 
             if best_j is None:
-                best_j = valid_indices[int(rng.integers(0, len(valid_indices)))]
-                best_e = 1.0
+                # last resort (should be rare)
+                cand_pos = int(rng.integers(0, len(valid_indices)))
+                best_j = valid_indices[cand_pos]
+                best_e = float(energy_computer.compute(
+                    claim_vecs[i],
+                    np.asarray(pairs[best_j].get("evidence_vecs"), dtype=np.float32),
+                ).energy)
 
             chosen_js.append(best_j)
             chosen_energies.append(best_e)
@@ -355,15 +448,20 @@ class HardMinedPairGeneratorV2(AdversarialPairGenerator):
                 "id": pairs[i].get("id", i),
                 "claim": pairs[i]["claim"],
                 "evidence": pairs[chosen_js[i]].get("evidence", []),
+                "evidence_ids": pairs[chosen_js[i]].get("evidence_ids"),
                 "evidence_vecs": pairs[chosen_js[i]].get("evidence_vecs"),
-                "label": "NEG_HARD_V2",
+                "label": "NEG_HARD_V2" if not self.rerank_by_energy else "NEG_HARDEST",
             }
             for i in range(n)
         ]
 
         return negs, {
-            "mode": "hard_mined_v2",
+            "mode": self.name,
             "n": n,
+            "top_candidates": int(K),
+            "rerank_by_energy": bool(self.rerank_by_energy),
+            "require_page_mismatch": bool(self.require_page_mismatch),
+            "require_disjoint_ids": bool(self.require_disjoint_ids),
             "mean_energy": float(np.mean(chosen_energies)),
             "min_energy": float(np.min(chosen_energies)),
             "max_energy": float(np.max(chosen_energies)),
@@ -390,6 +488,17 @@ def get_adversarial_generator(mode: str, **kwargs) -> AdversarialPairGenerator:
     if mode == "hard_mined":
         return HardMinedPairGenerator()
     if mode == "hard_mined_v2":
-        return HardMinedPairGeneratorV2()
-
+        return HardMinedPairGeneratorV2(
+            top_candidates=int(kwargs.get("top_candidates", 16)),
+            rerank_by_energy=bool(kwargs.get("rerank_by_energy", False)),
+            require_page_mismatch=bool(kwargs.get("require_page_mismatch", True)),
+            require_disjoint_ids=bool(kwargs.get("require_disjoint_ids", True)),
+        )
+    if mode == "hardest_energy_mined":
+        return HardMinedPairGeneratorV2(
+            top_candidates=int(kwargs.get("top_candidates", 16)),
+            rerank_by_energy=True,
+            require_page_mismatch=bool(kwargs.get("require_page_mismatch", True)),
+            require_disjoint_ids=bool(kwargs.get("require_disjoint_ids", True)),
+        )
     raise ValueError(f"Unknown neg_mode: {mode}")

@@ -67,6 +67,52 @@ class VerifiabilityGate:
 
         return self.energy_computer.compute(claim_vec, evidence_vecs)
 
+    def compute_axes(
+        self,
+        claim: str,
+        evidence_texts: List[str],
+        *,
+        claim_vec: Optional[np.ndarray] = None,
+        evidence_vecs: Optional[np.ndarray] = None,
+    ) -> tuple[EnergyResult, AxisBundle, dict]:
+        """
+        Compute energy + AxisBundle once.
+        Use this for policy sweeps so policies don't "soak" measurement by recomputing.
+        """
+
+        if claim_vec is None:
+            claim_vec_raw = self.embedder.embed([claim])
+            if claim_vec_raw.shape[0] != 1:
+                raise ValueError(f"Unexpected claim embedding shape: {claim_vec_raw.shape}")
+            claim_vec = claim_vec_raw[0]
+
+        if evidence_vecs is None:
+            evidence_vecs = self.embedder.embed(evidence_texts)
+
+        base = self.energy_computer.compute(claim_vec, evidence_vecs)
+
+        # Explained mass (preferred for "alignment" policies)
+        explained = getattr(base, "explained", None)
+        if explained is None:
+            explained = float(1.0 - float(base.energy))
+
+        axes = AxisBundle({
+            "energy": float(base.energy),
+            "explained": float(explained),
+            "participation_ratio": float(base.geometry.participation_ratio),
+            "sensitivity": float(base.geometry.sensitivity),
+            "alignment": float(base.geometry.alignment_to_sigma1),
+            "sim_margin": float(base.geometry.sim_margin),
+        })
+
+        embedding_info = {
+            "claim_dim": int(np.asarray(claim_vec).shape[0]),
+            "evidence_count": int(np.asarray(evidence_vecs).shape[0]),
+            "embedding_backend": self.embedder.name,
+        }
+
+        return base, axes, embedding_info
+
     # ---------------------------------------------------------
     # Full evaluation (energy + policy decision)
     # ---------------------------------------------------------
@@ -79,32 +125,31 @@ class VerifiabilityGate:
         *,
         run_id: str,
         split: str = "pos",
+        claim_vec: Optional[np.ndarray] = None,
+        evidence_vecs: Optional[np.ndarray] = None,
     ) -> EvaluationResult:
 
-        claim_vec = self.embedder.embed([claim])[0]
-        ev_vecs = self.embedder.embed(evidence_texts)
+        if claim_vec is None:
+            claim_vec = self.embedder.embed([claim])[0]
+        if evidence_vecs is None:
+            evidence_vecs = self.embedder.embed(evidence_texts)
 
-        # --- Energy computation ---
-
-        base = self.energy_computer.compute(claim_vec, ev_vecs)
-
-        # --- Build Decision Axes (explicit 3D surface) ---
-
-        axes = AxisBundle({
-            "energy": base.energy,
-            "participation_ratio": base.geometry.participation_ratio,
-            "sensitivity": base.geometry.sensitivity,
-            "alignment": base.geometry.alignment_to_sigma1,
-            "sim_margin": base.geometry.sim_margin,
-        })
-
-
+        base, axes, embedding_info = self.compute_axes(
+            claim,
+            evidence_texts,
+            claim_vec=claim_vec,
+            evidence_vecs=evidence_vecs,
+        )
         # --- Margin-based effectiveness (diagnostic only) ---
 
-        effectiveness = accept_margin_ratio(
-            energy=base.energy,
-            tau=policy.tau_accept,
-        )
+        tau = getattr(policy, "tau_accept", None)
+
+        if tau is None:
+            effectiveness = 0.0
+            margin_band = None
+        else:
+            effectiveness = accept_margin_ratio(energy=base.energy, tau=float(tau))
+            margin_band = 0.1 * float(tau)
 
         # --- Policy decision ---
 
@@ -121,6 +166,9 @@ class VerifiabilityGate:
 
         # --- Trace object (full transparency) ---
 
+        eff_clamped = float(max(0.0, min(1.0, float(effectiveness))))
+        difficulty = float(1.0 - eff_clamped)
+
         decision_trace = DecisionTrace(
             energy=base.energy,
             alignment=base.geometry.alignment_to_sigma1,
@@ -131,7 +179,8 @@ class VerifiabilityGate:
             pr_threshold=policy.pr_threshold,
             sensitivity_threshold=policy.sensitivity_threshold,
             effectiveness=effectiveness,
-            margin_band=0.1 * policy.tau_accept if policy.tau_accept else None,
+            difficulty=difficulty,
+            margin_band=margin_band,
             policy_name=policy.name,
             hard_negative_gap=policy.hard_negative_gap,
             verdict=verdict.value,
@@ -139,7 +188,7 @@ class VerifiabilityGate:
 
         embedding_info = {
             "claim_dim": int(claim_vec.shape[0]),
-            "evidence_count": int(ev_vecs.shape[0]),
+            "evidence_count": int(evidence_vecs.shape[0]),
             "embedding_backend": self.embedder.name,
         }
 

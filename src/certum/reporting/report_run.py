@@ -23,9 +23,13 @@ from certum.reporting.modules.metrics import (compute_auc, compute_tpr_at_far,
 from certum.reporting.modules.policy_comparison import sweep_policy_curve
 from certum.reporting.modules.scatter_plots import scatter_plot
 from certum.reporting.validate_gate_artifacts import validate_run_directory
+from certum.reporting.modules.gap_analysis import gap_conditioned_analysis
+from certum.reporting.modules.gap_analysis import conditional_axis_auc
 
 from certum.policy.energy_only import EnergyOnlyPolicy
 from certum.policy.policy import AdaptivePolicy
+from certum.reporting.modules.gap_axis_shift import axis_shift_analysis
+from certum.reporting.modules.gap_sweep import sweep_gap_width
 
 
 def main():
@@ -183,6 +187,42 @@ def main():
             energy_curve
         )
 
+
+
+        gap_width = 0.1  # or sweep this
+        gap_results = gap_conditioned_analysis(
+            pos_rows,
+            neg_rows,
+            tau,
+            current_pr_threshold,
+            current_sens_threshold,
+            gap_width
+        )   
+
+        mode_summary["gap_conditioned_analysis"] = gap_results
+
+
+        mode_summary["axis_shift"] = axis_shift_analysis(pos_rows, neg_rows)
+
+
+
+        gap_sweep_results = sweep_gap_width(
+            pos_rows,
+            neg_rows,
+            tau,
+            current_pr_threshold,
+            current_sens_threshold
+        )
+
+        mode_summary["gap_sweep"] = gap_sweep_results
+
+
+        mode_summary["gap_axis_signal"] = conditional_axis_auc(
+            pos_rows,
+            neg_rows,
+            tau,
+            gap_width
+        )
 
         # ---------------------------------------------------
         # 4. Scatter plots (per mode)

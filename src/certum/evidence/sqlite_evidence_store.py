@@ -41,25 +41,6 @@ class SQLiteEvidenceStore(EvidenceStore):
     # API
     # -------------------------------------------------
 
-    def has_embedding(self, element_id: str, model: str) -> bool:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            SELECT 1
-            FROM resolved r
-            JOIN embeddings e
-              ON e.element_id = r.element_id
-            WHERE r.element_id = ?
-              AND r.ok = 1
-              AND e.model = ?
-            LIMIT 1
-            """,
-            (element_id, model),
-        )
-        row = cur.fetchone()
-        cur.close()
-        return row is not None
-
     def get_texts(
         self,
         element_ids: List[str],

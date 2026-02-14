@@ -18,8 +18,11 @@ from certum.dataset.loader import load_examples
 from certum.evidence.sqlite_evidence_store import SQLiteEvidenceStore
 from certum.orchestration.audit import AuditLogger
 from certum.orchestration.factory import CertumFactory
-from certum.plot import plot_distributions
+from certum.reporting.modules.plot import plot_distributions
 from certum.policy.policy import AdaptivePolicy
+from certum.policy.policies import build_policies
+from certum.utils.math_utils import accept_margin_ratio
+from certum.utils.id_utils import compute_ids
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,7 @@ class CertumRunner:
         kind: str,
         in_path: Path,
         model: str,
+        policies: str,
         cache_db: Path,
         embedding_db: Path,
         regime: str,
@@ -60,8 +64,10 @@ class CertumRunner:
         out_report: Path,
         out_pos_scored: Path,
         out_neg_scored: Path,
-        neg_offset: Optional[int] = None,
+        out_pos_policies: Optional[Path] = None,
+        out_neg_policies: Optional[Path] = None,        neg_offset: Optional[int] = None,
         plot_png: Optional[Path] = None,
+        gap_width: float = 0.1,  
     ):
 
         start_time = time()
@@ -123,12 +129,28 @@ class CertumRunner:
             seed=seed,
             claim_vec_cache=claim_vec_cache,
         )
+        logger.info(f"Calibration complete. Sweep results: {sweep_results}")
 
+        policy_names = [p.strip() for p in policies.split(",") if p.strip()]
+        logger.info(f"Building policies: {policy_names}")
+
+        policies = build_policies(
+            policy_names,
+            tau_energy=sweep_results["tau_energy"],
+            tau_pr=sweep_results["tau_pr"],
+            tau_sensitivity=sweep_results["tau_sensitivity"],
+            gap_width=gap_width,
+        )
+
+        sweep_pos_rows: list[dict] = []
+        sweep_neg_rows: list[dict] = []
+        
         policy = AdaptivePolicy(
             tau_energy=sweep_results["tau_energy"],
             tau_pr=sweep_results["tau_pr"],
             tau_sensitivity=sweep_results["tau_sensitivity"],
             hard_negative_gap=sweep_results["hard_negative_gap"],
+            gap_width=gap_width,
         )
 
         # -------------------------------------------------
@@ -139,6 +161,16 @@ class CertumRunner:
 
         for sample in tqdm(eval_samples, desc="POS"):
             try:
+                # Policy sweep (optional)
+                if out_pos_policies is not None:
+                    sweep_pos_rows.extend(self._evaluate_policy_suite(
+                        gate=gate,
+                        sample=sample,
+                        policies_list=policies,
+                        run_id=run_id,
+                        split="pos",
+                    ))
+
                 result = gate.evaluate(
                     sample["claim"],
                     sample["evidence"],
@@ -169,6 +201,16 @@ class CertumRunner:
 
         for pair in tqdm(neg_pairs, desc="NEG"):
             try:
+                # Policy sweep (optional)
+                if out_neg_policies is not None:
+                    sweep_neg_rows.extend(self._evaluate_policy_suite(
+                        gate=gate,
+                        sample=pair,
+                        policies_list=policies,
+                        run_id=run_id,
+                        split="neg",
+                    ))
+
                 result = gate.evaluate(
                     pair["claim"],
                     pair["evidence"],
@@ -201,6 +243,11 @@ class CertumRunner:
             out_neg_scored,
         )
 
+        if out_pos_policies is not None:
+            self._write_policy_rows(out_pos_policies, sweep_pos_rows)
+        if out_neg_policies is not None:
+            self._write_policy_rows(out_neg_policies, sweep_neg_rows)
+
         if plot_png:
             plot_distributions(
                 pos_energies=[r.energy_result.energy for r in pos_results],
@@ -222,6 +269,66 @@ class CertumRunner:
                 s["evidence_vecs"] = embedder.embed(s["evidence"])
             if "claim_vec" not in s:
                 s["claim_vec"] = embedder.embed([s["claim"]])[0]
+
+    def _write_policy_rows(self, path: Path, rows: list[dict]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    def _evaluate_policy_suite(
+        self,
+        *,
+        gate,
+        sample: dict,
+        policies_list: list,
+        run_id: str,
+        split: str,
+    ) -> list[dict]:
+        """
+        Returns JSON-serializable rows (one per policy) for policy sweep outputs.
+        Does NOT change your existing main outputs.
+        """
+        # Compute axes once (vector-aware) — requires gate.evaluate to accept claim_vec/evidence_vecs,
+        # OR you can call gate.compute_axes if you added it.
+        base, axes, embedding_info = gate.compute_axes(
+            sample["claim"],
+            sample["evidence"],
+            claim_vec=sample.get("claim_vec"),
+            evidence_vecs=sample.get("evidence_vecs"),
+        )
+
+        rows: list[dict] = []
+        for pol in policies_list:
+            tau = getattr(pol, "tau_accept", None)
+            if tau is None:
+                eff = 0.0  # or None, but your Policy.decide expects a float
+            else:
+                eff = accept_margin_ratio(energy=float(axes.get("energy")), tau=float(tau))
+
+            verdict = pol.decide(axes, float(eff))
+
+            rows.append({
+                "run_id": run_id,
+                "split": split,
+                "id": sample.get("id"),
+                "policy_name": pol.name,
+                "policy_key": getattr(pol, "key", None),  # harmless if absent
+                "verdict": verdict.value,
+                "effectiveness": float(eff),
+                # axes
+                "energy": float(axes.get("energy")),
+                "explained": float(axes.get("explained")),
+                "participation_ratio": float(axes.get("participation_ratio")),
+                "sensitivity": float(axes.get("sensitivity")),
+                "alignment": float(axes.get("alignment")),
+                "sim_margin": float(axes.get("sim_margin")),
+                "tau_accept": float(tau) if tau is not None else None,
+                # lightweight metadata
+                "embedding_info": embedding_info,
+                "energy_result": base.to_dict(),
+            })
+        return rows
 
     def _write_outputs(
         self,
@@ -267,6 +374,9 @@ class CertumRunner:
         with open(out_report, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
 
+
+
+
 def main():
     ap = argparse.ArgumentParser()
 
@@ -275,17 +385,21 @@ def main():
     ap.add_argument("--cache_db", type=Path, required=True)
     ap.add_argument("--embedding_db", type=Path, required=True)
     ap.add_argument("--model", required=True)
+    ap.add_argument("--policies", default="adaptive", help="Comma-separated policy names to evaluate (e.g. energy_only,axis_only,monotone_adaptive).")
     ap.add_argument("--regime", required=True)
     ap.add_argument("--far", type=float, required=True)
     ap.add_argument("--cal_frac", type=float, required=True)
     ap.add_argument("--n", type=int, required=True)
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--neg_mode", required=True)
+    ap.add_argument("--out_pos_policies", type=Path, default=None, help="Optional: write policy-sweep POS rows (one row per sample per policy).")
+    ap.add_argument("--out_neg_policies", type=Path, default=None, help="Optional: write policy-sweep NEG rows (one row per sample per policy).")
     ap.add_argument("--neg_offset", type=int, default=37)
     ap.add_argument("--out_report", type=Path, required=True)
     ap.add_argument("--out_pos_scored", type=Path, required=True)
     ap.add_argument("--out_neg_scored", type=Path, required=True)
     ap.add_argument("--plot_png", type=Path, default=None)
+    ap.add_argument("--gap_width", type=float, default=0.1, help="Width of the ambiguity band as a fraction of tau_energy (default: 0.1 for 10%)")  
 
     args = ap.parse_args()
 

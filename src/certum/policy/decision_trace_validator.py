@@ -39,10 +39,9 @@ class DecisionTraceValidator:
         """
         # If thresholds absent, we can only do partial validation.
         if t.tau_accept is None or t.tau_review is None:
-            # Fallback: difficulty/effectiveness-only check
-            if t.difficulty > self.difficulty_high or t.effectiveness < self.eff_min_review:
+            if t.effectiveness < self.eff_min_review:
                 return "reject"
-            if t.difficulty > self.difficulty_low or t.effectiveness < self.eff_min_accept:
+            if t.effectiveness < self.eff_min_accept:
                 return "review"
             return "accept"
 
@@ -50,24 +49,22 @@ class DecisionTraceValidator:
         tau_review = t.tau_review
         margin = t.margin_band if t.margin_band is not None else 0.1 * tau
 
-        # Region C: Unsafe
-        if (
-            t.difficulty > self.difficulty_high
-            or t.energy > tau_review
-            or t.effectiveness < self.eff_min_review
-        ):
+        # Hard reject zone
+        if t.energy > tau_review or t.effectiveness < self.eff_min_review:
             return "reject"
 
-        # Region B: Hard / ambiguous
-        if (
-            t.difficulty > self.difficulty_low
-            or abs(t.energy - tau) <= margin
-            or t.effectiveness < self.eff_min_accept
-        ):
+        # Ambiguity / review triggers
+        if abs(t.energy - tau) <= margin:
             return "review"
-
-        # Region A: Safe
-        return "accept"
+        if t.effectiveness < self.eff_min_accept:
+            return "review"
+        if t.pr_threshold is not None and t.participation_ratio > t.pr_threshold:
+            return "review"
+        if t.sensitivity_threshold is not None and t.sensitivity > t.sensitivity_threshold:
+            return "review"
+        
+        # Accept if energy is under tau; otherwise review (monotone-safe default)
+        return "accept" if t.energy <= tau else "review"
 
     def validate(self, t: DecisionTrace) -> List[ValidationIssue]:
         issues: List[ValidationIssue] = []
