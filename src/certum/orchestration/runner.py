@@ -1,6 +1,7 @@
 # src/certum/runner.py
 
 import argparse
+import hashlib
 import json
 import logging
 import random
@@ -11,7 +12,6 @@ from typing import Optional
 
 import numpy as np
 from tqdm import tqdm
-import hashlib
 
 from certum.adversarial import get_adversarial_generator
 from certum.calibration import AdaptiveCalibrator
@@ -19,12 +19,11 @@ from certum.dataset.loader import load_examples
 from certum.evidence.sqlite_evidence_store import SQLiteEvidenceStore
 from certum.orchestration.audit import AuditLogger
 from certum.orchestration.factory import CertumFactory
-from certum.reporting.modules.plot import plot_distributions
-from certum.policy.policy import AdaptivePolicy
 from certum.policy.policies import build_policies
-from certum.utils.math_utils import accept_margin_ratio
+from certum.policy.policy import AdaptivePolicy
+from certum.reporting.modules.plot import plot_distributions
 from certum.utils.id_utils import compute_ids
-
+from certum.utils.math_utils import accept_margin_ratio
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +363,8 @@ class CertumRunner:
                 "embedding_backend": embedding_info.get("embedding_backend"),
                 "claim_dim": embedding_info.get("claim_dim"),
                 "evidence_count": embedding_info.get("evidence_count"),
+
+                "tau_accept": policy.tau_accept,
 
                 # keep full nested structure for later deep dives
                 "energy": base.energy,

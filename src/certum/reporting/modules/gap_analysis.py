@@ -1,11 +1,13 @@
 import numpy as np
 from sklearn.metrics import roc_auc_score
+
+from certum.axes.bundle import AxisBundle
 from certum.policy.energy_only import EnergyOnlyPolicy
 from certum.policy.policy import AdaptivePolicy
-from certum.axes.bundle import AxisBundle
-from certum.reporting.modules.policy_comparison import evaluate_policy
 from certum.reporting.modules.auc import auc_from_curve
-from certum.reporting.modules.policy_comparison import sweep_policy_curve
+from certum.reporting.modules.policy_comparison import (evaluate_policy,
+                                                        sweep_policy_curve)
+
 
 def extract_energy(rows):
     return np.array([r["energy"]["value"] for r in rows], dtype=float)

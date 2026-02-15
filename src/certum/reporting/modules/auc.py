@@ -1,5 +1,5 @@
-from sklearn.metrics import auc
 import numpy as np
+from sklearn.metrics import auc
 
 
 def auc_from_curve(curve):

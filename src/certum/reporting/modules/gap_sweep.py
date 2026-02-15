@@ -1,10 +1,8 @@
 import numpy as np
 
-from certum.policy.policy import AdaptivePolicy
 from certum.policy.energy_only import EnergyOnlyPolicy
+from certum.policy.policy import AdaptivePolicy
 from certum.reporting.modules.policy_comparison import evaluate_policy
-from certum.reporting.modules.auc import auc_from_curve
-from certum.reporting.modules.policy_comparison import sweep_policy_curve
 
 
 def sweep_gap_width(

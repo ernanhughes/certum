@@ -34,17 +34,24 @@ $DATASETS = @{
         cache_db = "E:\data\certum_cache.db"
     }
 
-    scifact = @{
-        data_source = "scifact"
-        kind     = "jsonl"
-        data     = "E:\data\scifact_dev.jsonl"
-        cache_db = "E:\data\certum_cache.db"
-    }
-
     pubmed = @{
         data_source = "pubmed"
         kind     = "jsonl"
         data     = "E:\data\pubmedqa_train.jsonl"
+        cache_db = "E:\data\certum_cache.db"
+    }
+
+    casehold = @{
+        data_source = "casehold"
+        kind     = "jsonl"
+        data     = "E:\data\casehold_pos.jsonl"
+        cache_db = "E:\data\certum_cache.db"
+    }
+
+    scifact = @{
+        data_source = "scifact"
+        kind     = "jsonl"
+        data     = "E:\data\scifact_dev.jsonl"
         cache_db = "E:\data\certum_cache.db"
     }
 

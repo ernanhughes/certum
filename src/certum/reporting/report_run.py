@@ -4,32 +4,37 @@ import json
 from pathlib import Path
 
 import numpy as np
-from certum.reporting.modules.auc import auc_from_curve
-from certum.reporting.modules.boundary import dominates
-from certum.reporting.modules.correlation_matrix import (correlation_eigenvalues,
-                                                  correlation_matrix,
-                                                  detect_axis_collapse)
-from certum.reporting.modules.formatter import build_markdown
-from certum.reporting.modules.geometry_stats import (alignment_vs_correctness,
-                                              effectiveness_mean,
-                                              energy_vs_participation,
-                                              hard_negative_gap_distribution, hard_negative_gap_per_row,
-                                              stability_fraction)
-from certum.reporting.modules.loader import discover_modes, load_json, load_jsonl
-from certum.reporting.modules.metrics import (compute_auc, compute_tpr_at_far,
-                                       extract_energies,
-                                       summarize_distribution,
-                                       summarize_geometry, summarize_verdicts)
-from certum.reporting.modules.policy_comparison import sweep_policy_curve
-from certum.reporting.modules.scatter_plots import scatter_plot
-from certum.reporting.validate_gate_artifacts import validate_run_directory
-from certum.reporting.modules.gap_analysis import gap_conditioned_analysis
-from certum.reporting.modules.gap_analysis import conditional_axis_auc
 
 from certum.policy.energy_only import EnergyOnlyPolicy
 from certum.policy.policy import AdaptivePolicy
+from certum.reporting.build_duckdb import build_duckdb_for_run
+from certum.reporting.modules.auc import auc_from_curve
+from certum.reporting.modules.boundary import dominates
+from certum.reporting.modules.correlation_matrix import (
+    correlation_eigenvalues, correlation_matrix, detect_axis_collapse)
+from certum.reporting.modules.formatter import build_markdown
+from certum.reporting.modules.gap_analysis import (conditional_axis_auc,
+                                                   gap_conditioned_analysis)
 from certum.reporting.modules.gap_axis_shift import axis_shift_analysis
 from certum.reporting.modules.gap_sweep import sweep_gap_width
+from certum.reporting.modules.geometry_stats import (
+    alignment_vs_correctness, effectiveness_mean, energy_vs_participation,
+    hard_negative_gap_distribution, hard_negative_gap_per_row,
+    stability_fraction)
+from certum.reporting.modules.loader import (discover_modes, load_json,
+                                             load_jsonl)
+from certum.reporting.modules.metrics import (compute_auc, compute_tpr_at_far,
+                                              extract_energies,
+                                              summarize_distribution,
+                                              summarize_geometry,
+                                              summarize_verdicts)
+from certum.reporting.modules.policy_comparison import sweep_policy_curve
+from certum.reporting.modules.scatter_plots import scatter_plot
+from certum.reporting.policy_sweep_report import main as policy_sweep_main
+from certum.reporting.validate_gate_artifacts import validate_run_directory
+from certum.policy.soft_weighted import SoftWeightedPolicy
+from certum.reporting.modules.residual_axis_test import residual_axis_auc
+from certum.reporting.modules.residual_analysis import residual_axis_test
 
 
 def main():
@@ -78,7 +83,8 @@ def main():
 
         tau = cal["calibration"]["tau_energy"]
 
-        from certum.reporting.modules.policy_comparison import compare_energy_vs_policy
+        from certum.reporting.modules.policy_comparison import \
+            compare_energy_vs_policy
 
         # --- Basic metrics ---
         auc = compute_auc(pos_rows, neg_rows)
@@ -200,12 +206,7 @@ def main():
         )   
 
         mode_summary["gap_conditioned_analysis"] = gap_results
-
-
         mode_summary["axis_shift"] = axis_shift_analysis(pos_rows, neg_rows)
-
-
-
         gap_sweep_results = sweep_gap_width(
             pos_rows,
             neg_rows,
@@ -223,6 +224,58 @@ def main():
             tau,
             gap_width
         )
+
+        taus_soft = np.linspace(0.0, 2.0, 150)
+
+        soft_curve = sweep_policy_curve(
+            pos_rows,
+            neg_rows,
+            lambda tau: SoftWeightedPolicy(
+                tau_score=tau,
+                w_energy=1.0,
+                w_pr=0.5,
+                w_sensitivity=0.5,
+            ),
+            taus_soft
+        )
+
+        mode_summary["roc_soft_weighted"] = soft_curve
+
+        soft_auc = auc_from_curve(soft_curve)
+
+        mode_summary["auc_soft_weighted"] = soft_auc
+        mode_summary["soft_vs_energy_delta"] = soft_auc - mode_summary["auc_energy_only"]
+        mode_summary["soft_dominates_energy"] = soft_auc > mode_summary["auc_energy_only"]
+
+        target_far = 0.01  # or use adaptive FAR
+
+        energy_tpr_equal = equal_far_auc(energy_curve, target_far)
+        soft_tpr_equal = equal_far_auc(soft_curve, target_far)
+
+        mode_summary["equal_far_comparison"] = {
+            "target_far": target_far,
+            "energy_tpr": energy_tpr_equal,
+            "soft_tpr": soft_tpr_equal,
+            "tpr_gain": soft_tpr_equal - energy_tpr_equal,
+        }
+
+        residual_results = residual_axis_auc(
+            pos_rows,
+            neg_rows,
+            tau,
+            band_width=0.05
+        )
+
+        mode_summary["residual_axis_test"] = residual_results
+
+
+        # ---------------------------------------------------
+        # Residual independence test
+        # ---------------------------------------------------
+
+        residual_results = residual_axis_test(pos_rows, neg_rows)
+        mode_summary["residual_axis_independence"] = residual_results
+
 
         # ---------------------------------------------------
         # 4. Scatter plots (per mode)
@@ -260,6 +313,7 @@ def main():
             f"{mode} POS Sensitivity vs Participation"
         )
 
+
     neg_deragend = []
     neg_hard = []
     for mode, paths in modes.items():
@@ -290,8 +344,27 @@ def main():
     with md_path.open("w", encoding="utf-8") as f:
         f.write(md)
 
+    duckdb_path = run_dir / "certum_results.duckdb"
+    build_duckdb_for_run(
+        out_report=json_path,
+        out_pos_scored= run_dir / "pos_hard_mined_v2.jsonl",
+        out_neg_scored= run_dir / "neg_hard_mined_v2.jsonl",
+        out_pos_policies= run_dir / "pos_hard_mined_v2.policies.jsonl",
+        out_neg_policies= run_dir / "neg_hard_mined_v2.policies.jsonl",
+        out_duckdb=duckdb_path,
+    )
+
+
     print(f"\nReport written to: {json_path}")
     print(f"Markdown report: {md_path}")
+
+
+def equal_far_auc(curve, target_far):
+    fars = np.array([p["far"] for p in curve])
+    tprs = np.array([p["tpr"] for p in curve])
+
+    idx = np.argmin(np.abs(fars - target_far))
+    return float(tprs[idx])
 
 
 if __name__ == "__main__":

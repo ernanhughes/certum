@@ -65,7 +65,8 @@ def correlation_block(axes):
 
     def safe_corr(a, b):
         if np.std(a) == 0 or np.std(b) == 0:
-            return 0.0
+            return 0.
+        print(f"Safe corr: n={len(a)}, a_mean={np.mean(a):.3f}, b_mean={np.mean(b):.3f}")
         return float(np.corrcoef(a, b)[0, 1])
 
     return {

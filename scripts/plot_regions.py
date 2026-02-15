@@ -74,8 +74,6 @@ if __name__ == "__main__":
     neg_difficulties = [d for d, e, v in neg]
     neg_energies = [e for d, e, v in neg]
 
-    print("Energy–Difficulty correlation:", np.corrcoef(neg_energies, neg_difficulties)[0,1])
-
     print("Mean difficulty (accepted neg):",
         np.mean([d for d,e,v in neg if v=="accept"]))
 

@@ -304,6 +304,7 @@ def main():
     for name, (pos_scores, neg_scores, higher_is_pos) in candidates.items():
 
         # Correlation with energy
+        print(f"\nTesting secondary axis: {name}")
         corr = np.corrcoef(
             np.concatenate([pos["energy"], neg["energy"]]),
             np.concatenate([pos_scores, neg_scores])

@@ -21,7 +21,11 @@ def extract_axis(rows, axis_name):
 
 def correlation_with_correctness(rows, axis_name):
     vals, labels = extract_axis(rows, axis_name)
-    if len(vals) < 5:
+    if len(vals) != len(labels):
+        return None
+    if np.std(vals) < 1e-12 or np.std(labels) < 1e-12:
+        return None
+    if len(vals) < 5 or len(labels) == 0 or labels.mean() == 0:
         return None
     return float(np.corrcoef(vals, labels)[0, 1])
 

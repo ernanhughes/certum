@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def dominates(curve_a, curve_b):
     """
     Check if curve A dominates curve B.

@@ -59,7 +59,9 @@ def build_duckdb_for_run(
             [str(out_neg_policies)],
         )
     else:
-        con.execute("CREATE OR REPLACE TABLE policy_sweep AS SELECT NULL::VARCHAR AS run_id WHERE FALSE")
+        con.execute(
+            "CREATE OR REPLACE TABLE policy_sweep AS SELECT NULL::VARCHAR AS run_id WHERE FALSE"
+        )
 
     # -----------------------
     # eval_scored table (optional)
@@ -85,7 +87,9 @@ def build_duckdb_for_run(
             [str(out_neg_scored)],
         )
     else:
-        con.execute("CREATE OR REPLACE TABLE eval_scored AS SELECT NULL::VARCHAR AS meta WHERE FALSE")
+        con.execute(
+            "CREATE OR REPLACE TABLE eval_scored AS SELECT NULL::VARCHAR AS meta WHERE FALSE"
+        )
 
     # -----------------------
     # run_report table (single row)
@@ -108,13 +112,13 @@ def build_duckdb_for_run(
         """
         CREATE OR REPLACE VIEW v_policy_rates AS
         SELECT
-          policy_name,
-          split,
-          count(*) AS n,
-          avg(verdict = 'accept')::DOUBLE AS accept_rate,
-          avg(verdict = 'review')::DOUBLE AS review_rate,
-          avg(verdict = 'reject')::DOUBLE AS reject_rate,
-          any_value(tau_accept) AS tau_accept
+        policy_name AS policy,
+        split,
+        count(*) AS n,
+        avg(CASE WHEN verdict = 'accept' THEN 1.0 ELSE 0.0 END) AS accept_rate,
+        avg(CASE WHEN verdict = 'review' THEN 1.0 ELSE 0.0 END) AS review_rate,
+        avg(CASE WHEN verdict = 'reject' THEN 1.0 ELSE 0.0 END) AS reject_rate,
+        any_value(tau_accept) AS tau_accept
         FROM policy_sweep
         GROUP BY 1,2
         """

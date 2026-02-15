@@ -10,8 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence
+from typing import List, Optional, Sequence
 
 from certum.axes.bundle import AxisBundle
 from certum.custom_types import Verdict
