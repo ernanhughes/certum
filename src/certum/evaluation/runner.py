@@ -4,11 +4,10 @@ import argparse
 import json
 import logging
 import uuid
-from datetime import datetime
+import warnings
 from pathlib import Path
-from typing import Dict, List
 
-import pandas as pd
+import numpy as np
 
 from certum.embedding.hf_embedder import HFEmbedder
 from certum.embedding.sqlite_embedding_backend import SQLiteEmbeddingBackend
@@ -17,17 +16,18 @@ from certum.geometry.nli_wrapper import EntailmentModel
 from certum.geometry.sentence_support import SentenceSupportAnalyzer
 from certum.orchestration.summarization_runner import SummarizationRunner
 
-from .experiments import run_experiment, run_ablation
-from .modeling import run_model_cv
-from .plots import plot_roc, plot_precision_recall, plot_calibration
-from .metrics import bootstrap_auc
+
+from .experiments import run_ablation, run_experiment
 from .feature_builder import extract_dataframe_from_results
-from .modeling import run_xgb_model, run_xgb_model_cv
-import numpy as np
-import warnings
+from .metrics import bootstrap_auc
+from .modeling import run_model_cv, run_xgb_model, run_xgb_model_cv
+from .plots import plot_calibration, plot_precision_recall, plot_roc
+from .pipeline import run_summarization_pipeline
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 # =========================================================
@@ -48,16 +48,22 @@ class EvaluationRunner:
         seed: int,
         dataset_name: str,
         out_dir: Path,
-        entailment_db: str = "entailment_cache.db",
+        entailment_db: Path,
+        geometry_top_k: int = 1000,
+        rank_r: int = 32,
     ) -> None:
 
+        # =====================================================
+        # 0️⃣ Setup
+        # =====================================================
+
         run_id = str(uuid.uuid4())
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_folder = out_dir / timestamp
-        run_folder.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        np.random.seed(seed)
 
         logger.info(f"Starting evaluation run {run_id}")
-        logger.info(f"Run folder: {run_folder}")
+        logger.info(f"Run folder: {out_dir}")
 
         # =====================================================
         # 1️⃣ Load dataset
@@ -71,43 +77,20 @@ class EvaluationRunner:
         logger.info(f"Loaded {len(samples)} samples.")
 
         # =====================================================
-        # 2️⃣ Build core objects (no hardcoding)
+        # 2️⃣ Build Core Pipeline (NO hardcoding)
         # =====================================================
 
-        backend = SQLiteEmbeddingBackend(str(embedding_db))
-        print(f"Using embedding backend with DB: {embedding_db}")
-        embedder = HFEmbedder(
-            embedding_model,
-            backend=backend,
-        )
+        results_path = out_dir / "summary_results.jsonl"
 
-        energy_computer = ClaimEvidenceGeometry(
-            top_k=1000,
-            rank_r=32,
-        )
-
-        entailment_model = EntailmentModel(
-            model_name=nli_model,
-            batch_size=32,
-            db_path=str(entailment_db),
-        )
-
-        support_analyzer = SentenceSupportAnalyzer(
-            embedder=embedder,
-            energy_computer=energy_computer,
-            entailment_model=entailment_model,
+        results = run_summarization_pipeline(
+            samples=samples,
+            embedding_model=embedding_model,
+            embedding_db=embedding_db,
+            nli_model=nli_model,
+            entailment_db=entailment_db,
             top_k=top_k,
-        )
-
-        summarization_runner = SummarizationRunner(
-            support_analyzer=support_analyzer
-        )
-
-        results_path = run_folder / "summary_results.jsonl"
-
-        logger.info("Running summarization pipeline...")
-        results = summarization_runner.run(
-            samples,
+            geometry_top_k=geometry_top_k,
+            rank_r=rank_r,
             out_path=results_path,
         )
 
@@ -116,7 +99,6 @@ class EvaluationRunner:
         # =====================================================
 
         df = extract_dataframe_from_results(results)
-
         logger.info(f"Extracted feature dataframe shape: {df.shape}")
 
         # =====================================================
@@ -131,19 +113,22 @@ class EvaluationRunner:
             "embedding_model": embedding_model,
             "embedding_db": str(embedding_db),
             "nli_model": nli_model,
-            "top_k": top_k,
+            "entailment_db": str(entailment_db),
+            "top_k_sentence_support": top_k,
+            "geometry_top_k": geometry_top_k,
+            "geometry_rank_r": rank_r,
             "limit": limit,
             "seed": seed,
         }
 
-        self._write_json(run_folder / "config.json", config)
+        self._write_json(out_dir / "config.json", config)
 
         # =====================================================
         # 5️⃣ Correlation Matrix
         # =====================================================
 
         corr = df.corr(numeric_only=True)
-        corr.to_csv(run_folder / "feature_correlation.csv")
+        corr.to_csv(out_dir / "feature_correlation.csv")
 
         # =====================================================
         # 6️⃣ Feature Sets
@@ -154,7 +139,7 @@ class EvaluationRunner:
         results_summary = {}
 
         # =====================================================
-        # 7️⃣ Run Experiments
+        # 7️⃣ Logistic Experiments
         # =====================================================
 
         for name, features in feature_sets.items():
@@ -170,36 +155,34 @@ class EvaluationRunner:
 
             mean_cv, std_cv = run_model_cv(df, features)
 
-            print("Unique labels:", np.unique(result["y_test"]))
-
-            # plot_roc(
-            #     df,
-            #     features,
-            #     run_folder / f"roc_{name}.png",
-            # )
+            plot_roc(
+                result["y_test"],
+                result["probs"],
+                out_dir / f"roc_{name}.png",
+            )
 
             if name == "full":
                 ap = plot_precision_recall(
                     result["y_test"],
                     result["probs"],
-                    run_folder / "precision_recall.png",
+                    out_dir / "precision_recall.png",
                 )
 
                 plot_calibration(
                     result["y_test"],
                     result["probs"],
-                    run_folder / "calibration.png",
+                    out_dir / "calibration.png",
                 )
             else:
                 ap = None
 
             results_summary[name] = {
-                "auc": result["auc"],
-                "bootstrap_mean_auc": mean_boot,
-                "bootstrap_ci": [ci_low, ci_high],
-                "cv_mean_auc": mean_cv,
-                "cv_std_auc": std_cv,
-                "average_precision": ap,
+                "auc": float(result["auc"]),
+                "bootstrap_mean_auc": float(mean_boot),
+                "bootstrap_ci": [float(ci_low), float(ci_high)],
+                "cv_mean_auc": float(mean_cv),
+                "cv_std_auc": float(std_cv),
+                "average_precision": float(ap) if ap else None,
                 "coefficients": result["coefficients"],
             }
 
@@ -219,17 +202,33 @@ class EvaluationRunner:
 
         results_summary["ablation"] = ablation
 
+        # =====================================================
+        # 9️⃣ XGBoost (Full Features Only)
+        # =====================================================
 
-        xgb_auc, xgb_importance, y_test, probs = run_xgb_model(df, feature_sets["full"])
+        full_features = feature_sets["full"]
 
-        xgb_cv_mean, xgb_cv_std = run_xgb_model_cv(df, feature_sets["full"])
+        xgb_auc, xgb_importance, y_test, probs = run_xgb_model(
+            df,
+            full_features,
+        )
 
-        print(f"\nXGBoost AUC: {xgb_auc:.4f}")
-        print(f"XGBoost CV AUC: {xgb_cv_mean:.4f} ± {xgb_cv_std:.4f}")
+        xgb_cv_mean, xgb_cv_std = run_xgb_model_cv(
+            df,
+            full_features,
+        )
 
+        logger.info(f"XGBoost AUC: {xgb_auc:.4f}")
+        logger.info(f"XGBoost CV AUC: {xgb_cv_mean:.4f} ± {xgb_cv_std:.4f}")
+
+        plot_roc(
+            y_test,
+            probs,
+            out_dir / "roc_xgboost.png",
+        )
 
         # =====================================================
-        # 9️⃣ Write Final Report
+        # 🔟 Final Report
         # =====================================================
 
         report = {
@@ -237,13 +236,15 @@ class EvaluationRunner:
             "dataset": dataset_name,
             "n_samples": len(df),
             "results": results_summary,
-            "xgboost_auc": xgb_auc,
-            "xgboost_cv_mean": xgb_cv_mean,
-            "xgboost_cv_std": xgb_cv_std,
-            "xgboost_feature_importance": xgb_importance,
+            "xgboost": {
+                "auc": float(xgb_auc),
+                "cv_mean_auc": float(xgb_cv_mean),
+                "cv_std_auc": float(xgb_cv_std),
+                "feature_importance": xgb_importance,
+            },
         }
 
-        self._write_json(run_folder / "report.json", report)
+        self._write_json(out_dir / "report.json", report)
 
         logger.info("Evaluation complete.")
 
@@ -254,8 +255,6 @@ class EvaluationRunner:
     def _write_json(self, path: Path, obj: dict):
 
         def convert(o):
-            import numpy as np
-
             if isinstance(o, (np.float32, np.float64)):
                 return float(o)
             if isinstance(o, (np.int32, np.int64)):
@@ -327,6 +326,8 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--entailment_db", type=Path, default=Path("entailment_cache.db"))
+    ap.add_argument("--geometry_top_k", type=int, default=1000)
+    ap.add_argument("--rank_r", type=int, default=32)
 
     args = ap.parse_args()
 
@@ -343,6 +344,8 @@ def main():
         dataset_name=args.dataset_name,
         out_dir=args.out_dir,
         entailment_db=args.entailment_db,
+        geometry_top_k=args.geometry_top_k,
+        rank_r=args.rank_r,
     )
 
 

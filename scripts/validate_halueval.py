@@ -234,8 +234,8 @@ def main():
     print("\n=== Loading Samples ===")
     samples = load_jsonl("E:\\data\\halueval_test_v1.jsonl")
 
-    limit = 3000
-    samples = samples[:limit]
+    # limit = 3000
+    # samples = samples[:limit]
     print(f"Loaded {len(samples)} samples for analysis.")
 
     backend = SQLiteEmbeddingBackend("E:\\data\\global_embeddings.db")

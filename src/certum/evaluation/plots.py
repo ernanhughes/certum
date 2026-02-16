@@ -3,17 +3,13 @@ Plotting utilities for evaluation.
 """
 
 import matplotlib.pyplot as plt
-from sklearn.metrics import auc, roc_curve, precision_recall_curve, average_precision_score
-from sklearn.calibration import calibration_curve
 import numpy as np
+from sklearn.calibration import calibration_curve
+from sklearn.metrics import (auc, average_precision_score,
+                             precision_recall_curve, roc_curve)
 
 
 def plot_roc(y_true, probs, out_path):
-    print(type(y_true))
-    print(y_true[:5])
-    print(type(probs))
-    print(probs[:5])
-
     # Defensive conversion
     y_true = np.asarray(y_true).reshape(-1)
     probs = np.asarray(probs).reshape(-1)

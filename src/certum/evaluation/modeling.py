@@ -2,16 +2,14 @@
 Model training utilities for Certum evaluation.
 """
 
-from typing import List, Tuple, Dict
-import numpy as np
+from typing import Dict, List, Tuple
 
+import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
-import numpy as np
 from xgboost import XGBClassifier
-from sklearn.model_selection import StratifiedKFold
 
 
 def run_model(
@@ -143,7 +141,6 @@ def run_xgb_model_cv(df, features, seed=42, n_splits=5):
             reg_lambda=1.0,
             random_state=seed,
             eval_metric="logloss",
-            use_label_encoder=False,
         )
 
         model.fit(X[train_idx], y[train_idx])

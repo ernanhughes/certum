@@ -20,6 +20,8 @@ $GLOBAL = @{
     TOP_K           = "3"
     N               = "3000"
     SEED            = "1337"
+    GEOMETRY_TOP_K   = "1000"
+    RANK_R          = "32"
 }
 
 # ============================================================
@@ -141,7 +143,9 @@ py -m certum.evaluation.runner `
     --top_k $GLOBAL.TOP_K `
     --limit $GLOBAL.N `
     --seed $GLOBAL.SEED `
-    --entailment_db $GLOBAL.ENTAILMENT_DB
+    --entailment_db $GLOBAL.ENTAILMENT_DB `
+    --geometry_top_k $GLOBAL.GEOMETRY_TOP_K `
+    --rank_r $GLOBAL.RANK_R
 
 Write-Host ""
 Write-Host "DONE."

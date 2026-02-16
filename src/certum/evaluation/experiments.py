@@ -42,6 +42,7 @@ def run_ablation(
     remove_sets: List[List[str]],
 ):
     print("\n=== Ablation Study ===")
+    results = {}
 
     for remove in remove_sets:
         features = [f for f in base_features if f not in remove]
@@ -52,3 +53,9 @@ def run_ablation(
         print(f"\nRemoved: {remove}")
         print(f"AUC: {mean_boot:.4f}")
         print(f"CI: [{ci_low:.4f}, {ci_high:.4f}]")
+        results[str(remove)] = {
+            "auc": mean_boot,
+            "ci": [ci_low, ci_high],
+        }
+    return results
+
